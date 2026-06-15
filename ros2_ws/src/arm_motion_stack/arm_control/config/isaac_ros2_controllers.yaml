@@ -1,0 +1,32 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+arm_controller:
+  ros__parameters:
+    joints:
+      - J1
+      - J2
+      - J3
+      - J4
+      - J5
+      - J6
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    allow_partial_joints_goal: false
+    open_loop_control: false
+    # Isaac Sim topic bridge reservation:
+    # commands: /isaac_joint_commands
+    # states: /isaac_joint_states
+    constraints:
+      goal_time: 0.5
+      stopped_velocity_tolerance: 0.01

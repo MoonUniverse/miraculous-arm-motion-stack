@@ -1,0 +1,25 @@
+# ROS 2 / colcon generated files
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Python/C++ generated files
+__pycache__/
+*.py[cod]
+*.o
+*.so
+*.a
+
+# Local editor and index files
+.vscode/
+.idea/
+
+# Runtime/log artifacts
+*.log
+*.bag
+*.db3
+*.sqlite
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,32 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: moveit_rviz_plugin/MotionPlanning
+    Name: MotionPlanning
+Visualization Manager:
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Grid
+    - Class: rviz_default_plugins/RobotModel
+      Description Topic:
+        Value: /robot_description
+      Enabled: true
+      Name: RobotModel
+    - Class: moveit_rviz_plugin/MotionPlanning
+      Enabled: true
+      Move Group Namespace: ""
+      MoveIt_Allow_Approximate_IK: false
+      MoveIt_Planning_Attempts: 10
+      MoveIt_Planning_Time: 5
+      Planning Group: single_arm
+      Name: MotionPlanning
+  Global Options:
+    Fixed Frame: base_link
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+Window Geometry:
+  Height: 900
+  Width: 1400

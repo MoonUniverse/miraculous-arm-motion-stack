@@ -1,0 +1,220 @@
+# arm_motion_stack
+
+ROS 2 + MoveIt 2 + ros2_control + Isaac Sim motion stack for the existing `ARM` 6DOF single-arm URDF.
+
+This project keeps the original SolidWorks-exported URDF intact and builds ROS 2 wrappers around it. It does not rename the original links or joints and does not replace the mechanical model with a simplified fake arm.
+
+## Change Record
+
+The repository-level setup and this stack bootstrap are recorded in:
+
+```text
+/home/alienware/Desktop/PersonalProject/CHANGELOG.md
+```
+
+## Current URDF Source
+
+- Original source in this workspace: `/home/alienware/Desktop/PersonalProject/arm_description/urdf/ARM.urdf`
+- Preserved copy: `ros2_ws/src/arm_motion_stack/arm_description/urdf/original/ARM.urdf`
+- ROS 2 model entry point: `ros2_ws/src/arm_motion_stack/arm_description/urdf/arm.urdf.xacro`
+- Xacro-converted model copy: `ros2_ws/src/arm_motion_stack/arm_description/urdf/original/ARM.model.urdf.xacro`
+
+Only the working xacro copy normalizes mesh filenames to `package://arm_description/meshes/...`. The raw original URDF is preserved unchanged.
+
+## Identified Robot Model
+
+- Robot name: `ARM`
+- Base link: `base_link`
+- Original terminal link: `J6`
+- Added tool/end-effector frame: `tool0`
+- Planning group: `single_arm`
+- Main joints: `J1`, `J2`, `J3`, `J4`, `J5`, `J6`
+
+No explicit TCP/tool link exists in the exported URDF, so `tool0` is currently a fixed zero-offset child of `J6`.
+
+## Link And Joint Tree
+
+```text
+base_link
+└── J1 joint, revolute, axis 0 0 1, limit [-3.14, 3.14], effort 0, velocity 0
+    └── link J1
+        └── J2 joint, revolute, axis 0 0 1, limit [-1.57, 1.57], effort 0, velocity 0
+            └── link J2
+                └── J3 joint, revolute, axis 0 0 1, limit [-3.14, 3.14], effort 0, velocity 0
+                    └── link J3
+                        └── J4 joint, revolute, axis 0 0 -1, limit [-1.57, 1.57], effort 0, velocity 0
+                            └── link J4
+                                └── J5 joint, revolute, axis 0 0 1, limit [-3.14, 3.14], effort 0, velocity 0
+                                    └── link J5
+                                        └── J6 joint, revolute, axis 0 0 1, limit [-1.57, 1.57], effort 0, velocity 0
+                                            └── link J6
+                                                └── J6_to_tool0 fixed joint
+                                                    └── link tool0
+```
+
+## URDF Completeness
+
+- Visual geometry: present for `base_link`, `J1`, `J2`, `J3`, `J4`, `J5`, `J6`.
+- Collision geometry: present for `base_link`, `J1`, `J2`, `J3`, `J4`, `J5`, `J6`.
+- Inertial data: present for `base_link`, `J1`, `J2`, `J3`, `J4`, `J5`, `J6`.
+- Joint effort limits: present but all are `0`; treated as TODO.
+- Joint velocity limits: present but all are `0`; temporary MoveIt/ros2_control test values are used.
+- Joint acceleration limits: absent from URDF; temporary MoveIt test values are used.
+- Mesh units: STL files came from SolidWorks. The URDF dimensions appear meter-scale from joint origins, but STL unit metadata is not reliable. Verify mm/m scale in RViz and Isaac Sim before dynamics or collision tuning.
+
+## Packages
+
+- `arm_description`: URDF/xacro, meshes, RViz display.
+- `arm_moveit_config`: SRDF, kinematics, OMPL, joint limits, MoveIt launch.
+- `arm_control`: ros2_control fake hardware and Isaac topic-based placeholders.
+- `arm_bringup`: top-level launch files.
+- `arm_kinematics`: FK, IK, Cartesian path demos.
+- `arm_dynamics`: placeholder dynamics interface for future Pinocchio.
+- `arm_planning_examples`: MoveIt planning examples.
+- `arm_interfaces`: custom FK/IK services and trajectory status message.
+
+## Dependencies
+
+```bash
+sudo apt update
+sudo apt install -y \
+  ros-humble-moveit \
+  ros-humble-ros2-control \
+  ros-humble-ros2-controllers \
+  ros-humble-joint-state-publisher-gui \
+  ros-humble-xacro \
+  ros-humble-rviz2 \
+  ros-humble-tf2-ros \
+  ros-humble-tf2-tools
+```
+
+## Build
+
+```bash
+cd /home/alienware/Desktop/PersonalProject/ros2_ws
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --symlink-install
+source install/setup.bash
+```
+
+## Validate URDF
+
+```bash
+cd /home/alienware/Desktop/PersonalProject/ros2_ws
+source /opt/ros/humble/setup.bash
+ros2 run xacro xacro src/arm_motion_stack/arm_description/urdf/arm.urdf.xacro > /tmp/arm.urdf
+check_urdf /tmp/arm.urdf
+```
+
+## Launch
+
+Display only:
+
+```bash
+ros2 launch arm_bringup display.launch.py
+```
+
+Fake ros2_control:
+
+```bash
+ros2 launch arm_bringup fake_demo.launch.py
+```
+
+MoveIt demo:
+
+```bash
+ros2 launch arm_bringup moveit_demo.launch.py
+```
+
+Isaac Sim reserved mode:
+
+```bash
+ros2 launch arm_bringup isaac_moveit.launch.py
+```
+
+The Isaac launch currently selects `hardware_type:=isaac`, which uses the placeholder `topic_based_ros2_control/TopicBasedSystem` plugin and reserves:
+
+- Joint command topic: `/isaac_joint_commands`
+- Joint state topic: `/isaac_joint_states`
+
+Replace the plugin and topic message contract with the exact Isaac Sim ROS 2 bridge or hardware interface used in your environment.
+
+## FK / IK / Planning Demos
+
+Start MoveIt first:
+
+```bash
+ros2 launch arm_bringup moveit_demo.launch.py
+```
+
+Run FK:
+
+```bash
+ros2 run arm_kinematics fk_demo --ros-args \
+  -p joint_positions:="[0.0, -0.5, 0.8, 0.0, 0.6, 0.0]"
+```
+
+Run IK:
+
+```bash
+ros2 run arm_kinematics ik_demo --ros-args \
+  -p x:=0.15 -p y:=-0.05 -p z:=0.25
+```
+
+Run Cartesian path demo:
+
+```bash
+ros2 run arm_kinematics cartesian_path_demo --ros-args -p execute:=false
+```
+
+Run planning examples:
+
+```bash
+ros2 run arm_planning_examples plan_to_joint_target --ros-args -p execute:=false
+ros2 run arm_planning_examples plan_to_pose_target --ros-args -p execute:=false
+ros2 run arm_planning_examples plan_cartesian_path --ros-args -p execute:=false
+ros2 run arm_planning_examples execute_named_pose --ros-args -p pose:=ready -p execute:=false
+```
+
+## Parameters To Replace Before Real Use
+
+- Replace `tool0` zero offset with the real TCP transform.
+- Replace all joint `effort=0` values with actuator torque/effort limits.
+- Replace all joint `velocity=0` values with real velocity limits.
+- Add real acceleration and jerk limits for planning and time parameterization.
+- Validate inertial tensors from CAD against the actual assembled robot.
+- Consider simplified collision meshes; current collision uses full visual STL meshes.
+- Confirm STL unit scaling in RViz and Isaac Sim.
+
+## Dual-Arm Extension
+
+Keep `arm_description` as the single-arm source of truth and add a new wrapper later, for example `dual_arm.urdf.xacro`, that instantiates left/right arms with prefixes. Then add SRDF groups:
+
+- `left_arm`
+- `right_arm`
+- `dual_arm`
+
+Avoid renaming the current single-arm joints in this package. Use xacro prefixes only in the dual-arm wrapper.
+
+## Pinocchio Extension
+
+`arm_dynamics::DynamicsModel` is a placeholder interface. Replace its implementation with Pinocchio by:
+
+1. Loading the generated URDF from `arm.urdf.xacro`.
+2. Building a Pinocchio model with the same joint order `J1..J6`.
+3. Replacing gravity, mass matrix, and inverse dynamics placeholder returns.
+4. Adding tests that compare dimensions and finite outputs for representative joint states.
+
+## Ruckig Extension
+
+MoveIt currently uses standard time parameterization. Add Ruckig by installing the MoveIt Ruckig smoothing plugin and configuring request adapters/time parameterization after real velocity, acceleration, and jerk limits are known.
+
+## Real Hardware Interface Extension
+
+Add a new ros2_control hardware plugin package when the real arm protocol is available. Keep the controller names and joints stable:
+
+- `joint_state_broadcaster`
+- `arm_controller`
+- joints: `J1`, `J2`, `J3`, `J4`, `J5`, `J6`
+
+Then add a new xacro hardware mode such as `hardware_type:=real` in `arm_description/urdf/ros2_control.xacro`.

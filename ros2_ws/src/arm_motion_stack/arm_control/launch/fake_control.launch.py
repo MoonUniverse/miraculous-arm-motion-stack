@@ -1,0 +1,48 @@
+import os
+
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.substitutions import Command
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+
+def generate_launch_description():
+    arm_description_share = get_package_share_directory("arm_description")
+    arm_control_share = get_package_share_directory("arm_control")
+    robot_xacro = os.path.join(arm_description_share, "urdf", "arm.urdf.xacro")
+    controller_config = os.path.join(arm_control_share, "config", "ros2_controllers.yaml")
+
+    robot_description = {
+        "robot_description": ParameterValue(
+            Command(["xacro ", robot_xacro, " hardware_type:=fake"]),
+            value_type=str,
+        )
+    }
+
+    control_node = Node(
+        package="controller_manager",
+        executable="ros2_control_node",
+        parameters=[robot_description, controller_config],
+        output="screen",
+    )
+
+    joint_state_broadcaster_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager"],
+        output="screen",
+    )
+
+    arm_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=["arm_controller", "--controller-manager", "/controller_manager"],
+        output="screen",
+    )
+
+    return LaunchDescription([
+        control_node,
+        joint_state_broadcaster_spawner,
+        arm_controller_spawner,
+    ])

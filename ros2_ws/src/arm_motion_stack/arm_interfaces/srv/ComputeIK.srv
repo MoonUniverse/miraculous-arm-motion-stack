@@ -1,0 +1,5 @@
+geometry_msgs/Pose target_pose
+---
+bool success
+sensor_msgs/JointState solution
+string message

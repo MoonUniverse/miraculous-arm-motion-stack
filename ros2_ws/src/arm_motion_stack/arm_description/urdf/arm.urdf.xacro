@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ARM">
+  <xacro:arg name="hardware_type" default="fake"/>
+
+  <xacro:include filename="materials.xacro"/>
+  <!-- Converted from urdf/original/ARM.urdf; link and joint names are preserved. -->
+  <xacro:include filename="original/ARM.model.urdf.xacro"/>
+  <xacro:include filename="ros2_control.xacro"/>
+
+  <!-- TODO: Replace this zero-offset tool frame with the real TCP transform if available. -->
+  <link name="tool0"/>
+  <joint name="J6_to_tool0" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="J6"/>
+    <child link="tool0"/>
+  </joint>
+
+  <xacro:arm_ros2_control name="ARMSystem" hardware_type="$(arg hardware_type)"/>
+</robot>

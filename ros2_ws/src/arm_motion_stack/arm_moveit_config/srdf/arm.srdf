@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="ARM">
+  <virtual_joint name="fixed_base" type="fixed" parent_frame="world" child_link="base_link"/>
+
+  <group name="single_arm">
+    <joint name="J1"/>
+    <joint name="J2"/>
+    <joint name="J3"/>
+    <joint name="J4"/>
+    <joint name="J5"/>
+    <joint name="J6"/>
+  </group>
+
+  <group_state name="home" group="single_arm">
+    <joint name="J1" value="0"/>
+    <joint name="J2" value="0"/>
+    <joint name="J3" value="0"/>
+    <joint name="J4" value="0"/>
+    <joint name="J5" value="0"/>
+    <joint name="J6" value="0"/>
+  </group_state>
+
+  <group_state name="ready" group="single_arm">
+    <joint name="J1" value="0"/>
+    <joint name="J2" value="-0.5"/>
+    <joint name="J3" value="0.8"/>
+    <joint name="J4" value="0"/>
+    <joint name="J5" value="0.6"/>
+    <joint name="J6" value="0"/>
+  </group_state>
+
+  <disable_collisions link1="base_link" link2="J1" reason="Adjacent"/>
+  <disable_collisions link1="J1" link2="J2" reason="Adjacent"/>
+  <disable_collisions link1="J2" link2="J3" reason="Adjacent"/>
+  <disable_collisions link1="J3" link2="J4" reason="Adjacent"/>
+  <disable_collisions link1="J4" link2="J5" reason="Adjacent"/>
+  <disable_collisions link1="J5" link2="J6" reason="Adjacent"/>
+  <disable_collisions link1="J6" link2="tool0" reason="Adjacent"/>
+</robot>
