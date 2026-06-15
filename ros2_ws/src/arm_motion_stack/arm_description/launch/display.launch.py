@@ -10,6 +10,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     use_gui = LaunchConfiguration("use_gui")
     use_rviz = LaunchConfiguration("use_rviz")
+    joint_states_topic = LaunchConfiguration("joint_states_topic")
     model = PathJoinSubstitution([FindPackageShare("arm_description"), "urdf", "arm.urdf.xacro"])
     rviz_config = PathJoinSubstitution([FindPackageShare("arm_description"), "rviz", "display.rviz"])
 
@@ -23,23 +24,27 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("use_gui", default_value="true"),
         DeclareLaunchArgument("use_rviz", default_value="true"),
+        DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
             output="screen",
             parameters=[robot_description],
+            remappings=[("joint_states", joint_states_topic)],
         ),
         Node(
             package="joint_state_publisher_gui",
             executable="joint_state_publisher_gui",
             condition=IfCondition(use_gui),
             parameters=[robot_description],
+            remappings=[("joint_states", joint_states_topic)],
         ),
         Node(
             package="joint_state_publisher",
             executable="joint_state_publisher",
             condition=UnlessCondition(use_gui),
             parameters=[robot_description],
+            remappings=[("joint_states", joint_states_topic)],
         ),
         Node(
             package="rviz2",

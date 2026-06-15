@@ -148,3 +148,35 @@ colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python
 - Launch commands in this environment need `ROS_LOG_DIR=/tmp/ros-log` because `~/.ros/log` is read-only in the sandbox.
 - MoveIt reports `No 3D sensor plugin(s) defined for octomap updates`; this is expected for the current no-depth-sensor configuration and does not block planning.
 - KDL warns that `base_link` has inertial data; this comes from the original SolidWorks URDF. Add a dummy root/world link later if KDL root inertial handling becomes important.
+
+### MoveIt Joint State Topic Isolation
+
+- Investigated MoveIt startup errors where joints such as `joint24`, `joint25`, `right_gripper_*`, and `left_gripper_*` were reported as missing from robot model `ARM`.
+- Confirmed those joint names were not present in the generated URDF, SRDF, MoveIt joint limits, controller config, or installed package configuration for this stack.
+- Root cause: MoveIt was consuming the global `/joint_states` topic, which can contain stale or unrelated joint states from other robot stacks or simulator sessions.
+- Added `joint_states_topic` launch argument with default `/arm_joint_states` across:
+  - `arm_description/launch/display.launch.py`
+  - `arm_control/launch/fake_control.launch.py`
+  - `arm_control/launch/isaac_control.launch.py`
+  - `arm_bringup/launch/display.launch.py`
+  - `arm_bringup/launch/fake_demo.launch.py`
+  - `arm_bringup/launch/moveit_demo.launch.py`
+  - `arm_bringup/launch/isaac_moveit.launch.py`
+  - `arm_moveit_config/launch/demo.launch.py`
+  - `arm_moveit_config/launch/move_group.launch.py`
+  - `arm_moveit_config/launch/moveit_rviz.launch.py`
+- Remapped `joint_states` for robot state publisher, ros2_control, MoveGroup, and MoveIt RViz to keep this stack isolated by default.
+- Removed an experimental placeholder `sensors_3d.yaml` load because raw MoveIt sensor-list YAML is not a valid ROS 2 node parameter file when passed directly to `move_group` in Humble.
+- Rebuilt the workspace successfully with system Python:
+
+```bash
+cd /home/alienware/Desktop/PersonalProject/ros2_ws
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+```
+
+- Re-tested `moveit_demo.launch.py use_rviz:=false`; MoveGroup reached `You can start planning now!` and no stale `joint24`/gripper missing-joint errors were reported.
+- Confirmed `/arm_joint_states` is present during bringup. A global `/joint_states` may still exist if other publishers are running, so the isolated default remains intentional.
+- Note: MoveIt logs may still display the internal subscription name `joint_states`; the launch remap resolves it to `joint_states_topic`.
+- Remaining octomap log: `No 3D sensor plugin(s) defined for octomap updates`. This is expected until a real depth camera or point-cloud updater is configured and does not block the current planning stack.

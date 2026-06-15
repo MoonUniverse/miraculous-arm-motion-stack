@@ -3,7 +3,8 @@ import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.substitutions import Command
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -23,6 +24,7 @@ def load_text(package_name, relative_path):
 
 
 def generate_launch_description():
+    joint_states_topic = LaunchConfiguration("joint_states_topic")
     arm_description_share = get_package_share_directory("arm_description")
     robot_xacro = os.path.join(arm_description_share, "urdf", "arm.urdf.xacro")
 
@@ -44,7 +46,6 @@ def generate_launch_description():
     }
     ompl_planning = load_yaml("arm_moveit_config", "config/ompl_planning.yaml")
     controllers = load_yaml("arm_moveit_config", "config/controllers.yaml")
-
     trajectory_execution = {
         "allow_trajectory_execution": True,
         "moveit_manage_controllers": False,
@@ -54,7 +55,7 @@ def generate_launch_description():
     }
     planning_scene_monitor = {
         "publish_planning_scene": True,
-        "publish_geometry_updates": True,
+        "publish_geometry_updates": False,
         "publish_state_updates": True,
         "publish_transforms_updates": True,
     }
@@ -73,6 +74,10 @@ def generate_launch_description():
             trajectory_execution,
             planning_scene_monitor,
         ],
+        remappings=[("joint_states", joint_states_topic)],
     )
 
-    return LaunchDescription([move_group])
+    return LaunchDescription([
+        DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
+        move_group,
+    ])

@@ -13,6 +13,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     use_rviz = LaunchConfiguration("use_rviz")
     hardware_type = LaunchConfiguration("hardware_type")
+    joint_states_topic = LaunchConfiguration("joint_states_topic")
     arm_description_share = get_package_share_directory("arm_description")
     robot_xacro = os.path.join(arm_description_share, "urdf", "arm.urdf.xacro")
 
@@ -26,27 +27,34 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("use_rviz", default_value="true"),
         DeclareLaunchArgument("hardware_type", default_value="isaac_mock"),
+        DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
             output="screen",
             parameters=[robot_description],
+            remappings=[("joint_states", joint_states_topic)],
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(get_package_share_directory("arm_control"), "launch", "isaac_control.launch.py")
             ),
-            launch_arguments={"hardware_type": hardware_type}.items(),
+            launch_arguments={
+                "hardware_type": hardware_type,
+                "joint_states_topic": joint_states_topic,
+            }.items(),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(get_package_share_directory("arm_moveit_config"), "launch", "move_group.launch.py")
-            )
+            ),
+            launch_arguments={"joint_states_topic": joint_states_topic}.items(),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(get_package_share_directory("arm_moveit_config"), "launch", "moveit_rviz.launch.py")
             ),
+            launch_arguments={"joint_states_topic": joint_states_topic}.items(),
             condition=IfCondition(use_rviz),
         ),
     ])

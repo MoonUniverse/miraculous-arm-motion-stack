@@ -144,6 +144,20 @@ Headless MoveIt smoke test:
 ROS_LOG_DIR=/tmp/ros-log ros2 launch arm_bringup moveit_demo.launch.py use_rviz:=false
 ```
 
+### Joint State Topic Isolation
+
+The bringup launch files default to `joint_states_topic:=/arm_joint_states`.
+This keeps the ARM MoveIt stack from consuming unrelated global `/joint_states`
+messages from other robots, stale simulators, or gripper publishers. If you need
+the traditional global topic in a clean single-robot session, launch with:
+
+```bash
+ros2 launch arm_bringup moveit_demo.launch.py joint_states_topic:=/joint_states
+```
+
+MoveIt may still log the internal subscription name as `joint_states`; the
+launch remap resolves it to the selected topic.
+
 Isaac Sim reserved mode:
 
 ```bash
@@ -213,8 +227,21 @@ After installing the ROS Humble MoveIt/ros2_control dependencies, the following 
 - `ik_demo`
 - `plan_to_joint_target`
 - `plan_to_pose_target`
+- `moveit_demo.launch.py use_rviz:=false` after joint-state topic isolation; no stale `joint24` or gripper joint names were reported by MoveIt.
 
 In this sandbox, use `ROS_LOG_DIR=/tmp/ros-log` because `~/.ros/log` is read-only.
+
+## Runtime Notes
+
+- MoveIt may print `No 3D sensor plugin(s) defined for octomap updates` when no
+  depth camera or point cloud updater is configured. This is expected for the
+  current planning-only setup and does not block FK, IK, OMPL planning, or
+  ros2_control trajectory execution.
+- Do not add placeholder octomap sensor parameters unless a real 3D sensor
+  topic exists. In ROS 2 Humble, raw MoveIt `sensors_3d.yaml` list syntax is not
+  a valid node parameter file when passed directly to `move_group`.
+- When a real RGB-D/depth/point-cloud source is available, add a proper
+  occupancy map updater configuration using the real sensor topic and frame.
 
 ## Parameters To Replace Before Real Use
 

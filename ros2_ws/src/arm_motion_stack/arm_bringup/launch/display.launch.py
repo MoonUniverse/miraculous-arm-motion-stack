@@ -9,6 +9,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("use_gui", default_value="true"),
         DeclareLaunchArgument("use_rviz", default_value="true"),
+        DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 PathJoinSubstitution([FindPackageShare("arm_description"), "launch", "display.launch.py"])
@@ -16,6 +17,7 @@ def generate_launch_description():
             launch_arguments={
                 "use_gui": LaunchConfiguration("use_gui"),
                 "use_rviz": LaunchConfiguration("use_rviz"),
+                "joint_states_topic": LaunchConfiguration("joint_states_topic"),
             }.items(),
         )
     ])

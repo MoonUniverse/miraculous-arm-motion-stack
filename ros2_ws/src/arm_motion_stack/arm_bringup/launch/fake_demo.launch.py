@@ -12,6 +12,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     use_rviz = LaunchConfiguration("use_rviz")
+    joint_states_topic = LaunchConfiguration("joint_states_topic")
     arm_description_share = get_package_share_directory("arm_description")
     robot_xacro = os.path.join(arm_description_share, "urdf", "arm.urdf.xacro")
     rviz_config = os.path.join(arm_description_share, "rviz", "display.rviz")
@@ -25,16 +26,19 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument("use_rviz", default_value="true"),
+        DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
             output="screen",
             parameters=[robot_description],
+            remappings=[("joint_states", joint_states_topic)],
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(get_package_share_directory("arm_control"), "launch", "fake_control.launch.py")
-            )
+            ),
+            launch_arguments={"joint_states_topic": joint_states_topic}.items(),
         ),
         Node(
             package="rviz2",
