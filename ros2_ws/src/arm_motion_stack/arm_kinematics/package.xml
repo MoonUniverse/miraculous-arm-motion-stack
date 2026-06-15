@@ -9,6 +9,8 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>geometry_msgs</depend>
+  <depend>ament_index_cpp</depend>
+  <depend>moveit_ros_planning</depend>
   <depend>moveit_ros_planning_interface</depend>
   <depend>rclcpp</depend>
 

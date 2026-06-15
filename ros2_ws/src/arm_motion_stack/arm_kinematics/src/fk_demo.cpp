@@ -4,8 +4,11 @@
 #include <vector>
 
 #include <Eigen/Geometry>
-#include <moveit/move_group_interface/move_group_interface.h>
+#include <moveit/robot_model_loader/robot_model_loader.h>
+#include <moveit/robot_state/robot_state.h>
 #include <rclcpp/rclcpp.hpp>
+
+#include "arm_kinematics/moveit_demo_utils.hpp"
 
 namespace
 {
@@ -17,8 +20,8 @@ const std::array<const char *, 6> kJointNames = {"J1", "J2", "J3", "J4", "J5", "
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  auto node = rclcpp::Node::make_shared(
-    "fk_demo", rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
+  auto node = rclcpp::Node::make_shared("fk_demo");
+  arm_kinematics::ensureMoveItRobotDescriptionParameters(node);
 
   std::vector<double> joint_positions =
     node->declare_parameter<std::vector<double>>("joint_positions", {0.0, -0.5, 0.8, 0.0, 0.6, 0.0});
@@ -29,19 +32,21 @@ int main(int argc, char ** argv)
     return 1;
   }
 
-  moveit::planning_interface::MoveGroupInterface move_group(node, kGroupName);
-  auto state = move_group.getCurrentState(5.0);
-  if (!state) {
-    RCLCPP_ERROR(node->get_logger(), "Failed to get current robot state.");
+  robot_model_loader::RobotModelLoader robot_model_loader(node, "robot_description");
+  const moveit::core::RobotModelPtr robot_model = robot_model_loader.getModel();
+  if (!robot_model) {
+    RCLCPP_ERROR(node->get_logger(), "Failed to load robot model.");
     rclcpp::shutdown();
-    return 1;
+    return 2;
   }
 
-  const auto * joint_model_group = state->getJointModelGroup(kGroupName);
-  state->setJointGroupPositions(joint_model_group, joint_positions);
-  state->update();
+  moveit::core::RobotState state(robot_model);
+  state.setToDefaultValues();
+  const auto * joint_model_group = robot_model->getJointModelGroup(kGroupName);
+  state.setJointGroupPositions(joint_model_group, joint_positions);
+  state.update();
 
-  const Eigen::Isometry3d & transform = state->getGlobalLinkTransform(kToolLink);
+  const Eigen::Isometry3d & transform = state.getGlobalLinkTransform(kToolLink);
   const Eigen::Quaterniond quat(transform.rotation());
 
   RCLCPP_INFO(node->get_logger(), "FK for joints [J1..J6]:");

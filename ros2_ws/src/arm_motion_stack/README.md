@@ -114,10 +114,22 @@ Display only:
 ros2 launch arm_bringup display.launch.py
 ```
 
+Headless display smoke test:
+
+```bash
+ROS_LOG_DIR=/tmp/ros-log ros2 launch arm_bringup display.launch.py use_gui:=false use_rviz:=false
+```
+
 Fake ros2_control:
 
 ```bash
 ros2 launch arm_bringup fake_demo.launch.py
+```
+
+Headless fake-control smoke test:
+
+```bash
+ROS_LOG_DIR=/tmp/ros-log ros2 launch arm_bringup fake_demo.launch.py use_rviz:=false
 ```
 
 MoveIt demo:
@@ -126,13 +138,25 @@ MoveIt demo:
 ros2 launch arm_bringup moveit_demo.launch.py
 ```
 
+Headless MoveIt smoke test:
+
+```bash
+ROS_LOG_DIR=/tmp/ros-log ros2 launch arm_bringup moveit_demo.launch.py use_rviz:=false
+```
+
 Isaac Sim reserved mode:
 
 ```bash
 ros2 launch arm_bringup isaac_moveit.launch.py
 ```
 
-The Isaac launch currently selects `hardware_type:=isaac`, which uses the placeholder `topic_based_ros2_control/TopicBasedSystem` plugin and reserves:
+The Isaac launch defaults to `hardware_type:=isaac_mock`, which uses `mock_components/GenericSystem` so the bringup path can be tested before the Isaac hardware plugin is installed. To select the reserved topic-based plugin later:
+
+```bash
+ros2 launch arm_bringup isaac_moveit.launch.py hardware_type:=isaac
+```
+
+The true `hardware_type:=isaac` path uses the placeholder `topic_based_ros2_control/TopicBasedSystem` plugin and reserves:
 
 - Joint command topic: `/isaac_joint_commands`
 - Joint state topic: `/isaac_joint_states`
@@ -157,8 +181,7 @@ ros2 run arm_kinematics fk_demo --ros-args \
 Run IK:
 
 ```bash
-ros2 run arm_kinematics ik_demo --ros-args \
-  -p x:=0.15 -p y:=-0.05 -p z:=0.25
+ros2 run arm_kinematics ik_demo
 ```
 
 Run Cartesian path demo:
@@ -175,6 +198,23 @@ ros2 run arm_planning_examples plan_to_pose_target --ros-args -p execute:=false
 ros2 run arm_planning_examples plan_cartesian_path --ros-args -p execute:=false
 ros2 run arm_planning_examples execute_named_pose --ros-args -p pose:=ready -p execute:=false
 ```
+
+The FK/IK/planning example nodes auto-load `robot_description`, SRDF, and KDL kinematics parameters from the installed `arm_description` and `arm_moveit_config` packages.
+
+## Latest Validation
+
+After installing the ROS Humble MoveIt/ros2_control dependencies, the following passed:
+
+- `xacro` generation and `check_urdf /tmp/arm.urdf`
+- full `colcon build --symlink-install`
+- fake ros2_control launch with both controllers activated
+- MoveIt demo launch with OMPL ready for planning
+- `fk_demo`
+- `ik_demo`
+- `plan_to_joint_target`
+- `plan_to_pose_target`
+
+In this sandbox, use `ROS_LOG_DIR=/tmp/ros-log` because `~/.ros/log` is read-only.
 
 ## Parameters To Replace Before Real Use
 

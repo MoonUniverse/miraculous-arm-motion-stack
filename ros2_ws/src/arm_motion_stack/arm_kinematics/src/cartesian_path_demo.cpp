@@ -7,6 +7,8 @@
 #include <moveit_msgs/msg/robot_trajectory.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+#include "arm_kinematics/moveit_demo_utils.hpp"
+
 namespace
 {
 constexpr char kGroupName[] = "single_arm";
@@ -16,8 +18,8 @@ constexpr char kToolLink[] = "tool0";
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  auto node = rclcpp::Node::make_shared(
-    "cartesian_path_demo", rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
+  auto node = rclcpp::Node::make_shared("cartesian_path_demo");
+  arm_kinematics::ensureMoveItRobotDescriptionParameters(node);
 
   const bool execute = node->declare_parameter<bool>("execute", false);
   moveit::planning_interface::MoveGroupInterface move_group(node, kGroupName);

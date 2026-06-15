@@ -4,6 +4,8 @@
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <rclcpp/rclcpp.hpp>
 
+#include "arm_planning_examples/moveit_demo_utils.hpp"
+
 namespace
 {
 constexpr char kGroupName[] = "single_arm";
@@ -12,8 +14,8 @@ constexpr char kGroupName[] = "single_arm";
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  auto node = rclcpp::Node::make_shared(
-    "execute_named_pose", rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
+  auto node = rclcpp::Node::make_shared("execute_named_pose");
+  arm_planning_examples::ensureMoveItRobotDescriptionParameters(node);
 
   const bool execute = node->declare_parameter<bool>("execute", false);
   const std::string pose_name = node->declare_parameter<std::string>("pose", "ready");

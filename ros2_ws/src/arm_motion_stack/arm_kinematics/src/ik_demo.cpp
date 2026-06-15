@@ -3,8 +3,11 @@
 #include <vector>
 
 #include <geometry_msgs/msg/pose.hpp>
-#include <moveit/move_group_interface/move_group_interface.h>
+#include <moveit/robot_model_loader/robot_model_loader.h>
+#include <moveit/robot_state/robot_state.h>
 #include <rclcpp/rclcpp.hpp>
+
+#include "arm_kinematics/moveit_demo_utils.hpp"
 
 namespace
 {
@@ -15,28 +18,30 @@ constexpr char kToolLink[] = "tool0";
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  auto node = rclcpp::Node::make_shared(
-    "ik_demo", rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
+  auto node = rclcpp::Node::make_shared("ik_demo");
+  arm_kinematics::ensureMoveItRobotDescriptionParameters(node);
 
   geometry_msgs::msg::Pose target_pose;
-  target_pose.position.x = node->declare_parameter<double>("x", 0.15);
-  target_pose.position.y = node->declare_parameter<double>("y", -0.05);
-  target_pose.position.z = node->declare_parameter<double>("z", 0.25);
-  target_pose.orientation.x = node->declare_parameter<double>("qx", 0.0);
-  target_pose.orientation.y = node->declare_parameter<double>("qy", 0.0);
-  target_pose.orientation.z = node->declare_parameter<double>("qz", 0.0);
-  target_pose.orientation.w = node->declare_parameter<double>("qw", 1.0);
+  target_pose.position.x = node->declare_parameter<double>("x", 0.020061);
+  target_pose.position.y = node->declare_parameter<double>("y", 0.000397);
+  target_pose.position.z = node->declare_parameter<double>("z", 0.549780);
+  target_pose.orientation.x = node->declare_parameter<double>("qx", 0.500000);
+  target_pose.orientation.y = node->declare_parameter<double>("qy", 0.500000);
+  target_pose.orientation.z = node->declare_parameter<double>("qz", 0.500002);
+  target_pose.orientation.w = node->declare_parameter<double>("qw", 0.499998);
 
-  moveit::planning_interface::MoveGroupInterface move_group(node, kGroupName);
-  auto state = move_group.getCurrentState(5.0);
-  if (!state) {
-    RCLCPP_ERROR(node->get_logger(), "Failed to get current robot state.");
+  robot_model_loader::RobotModelLoader robot_model_loader(node, "robot_description");
+  const moveit::core::RobotModelPtr robot_model = robot_model_loader.getModel();
+  if (!robot_model) {
+    RCLCPP_ERROR(node->get_logger(), "Failed to load robot model.");
     rclcpp::shutdown();
-    return 1;
+    return 2;
   }
 
-  const auto * joint_model_group = state->getJointModelGroup(kGroupName);
-  const bool found_ik = state->setFromIK(joint_model_group, target_pose, kToolLink, 0.1);
+  moveit::core::RobotState state(robot_model);
+  state.setToDefaultValues();
+  const auto * joint_model_group = robot_model->getJointModelGroup(kGroupName);
+  const bool found_ik = state.setFromIK(joint_model_group, target_pose, kToolLink, 0.1);
   if (!found_ik) {
     RCLCPP_ERROR(node->get_logger(), "IK failed for target pose.");
     rclcpp::shutdown();
@@ -44,7 +49,7 @@ int main(int argc, char ** argv)
   }
 
   std::vector<double> solution;
-  state->copyJointGroupPositions(joint_model_group, solution);
+  state.copyJointGroupPositions(joint_model_group, solution);
   const auto & joint_names = joint_model_group->getVariableNames();
   RCLCPP_INFO(node->get_logger(), "IK solution:");
   for (std::size_t i = 0; i < solution.size(); ++i) {

@@ -77,3 +77,74 @@ colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python
   - `ros2 launch arm_bringup fake_demo.launch.py`
   - `ros2 launch arm_bringup moveit_demo.launch.py`
 - Replace temporary joint velocity, acceleration, effort, and TCP values with real robot parameters.
+
+### Dependency Installation And Validation Follow-Up
+
+- Installed the missing ROS Humble dependencies with apt:
+  - `ros-humble-moveit`
+  - `ros-humble-ros2-control`
+  - `ros-humble-ros2-controllers`
+  - `ros-humble-joint-state-publisher-gui`
+  - `ros-humble-xacro`
+  - `ros-humble-rviz2`
+  - `ros-humble-tf2-ros`
+  - `ros-humble-tf2-tools`
+- Re-ran URDF generation and validation:
+
+```bash
+ros2 run xacro xacro src/arm_motion_stack/arm_description/urdf/arm.urdf.xacro > /tmp/arm.urdf
+check_urdf /tmp/arm.urdf
+```
+
+- `check_urdf` parsed successfully and reported the expected tree:
+  `base_link -> J1 -> J2 -> J3 -> J4 -> J5 -> J6 -> tool0`.
+- Full workspace build passed:
+
+```bash
+colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+```
+
+- Added headless launch switches while preserving GUI/RViz defaults:
+  - `use_gui:=false` for `arm_bringup display.launch.py`
+  - `use_rviz:=false` for display/fake/moveit/isaac bringup launch files
+- Validated `fake_demo.launch.py use_rviz:=false`:
+  - `ARMSystem` fake hardware initialized, configured, and activated.
+  - `arm_controller` loaded, configured, and activated.
+  - `joint_state_broadcaster` loaded, configured, and activated.
+- Validated `moveit_demo.launch.py use_rviz:=false`:
+  - MoveGroup loaded robot model `ARM`.
+  - OMPL planning pipeline initialized.
+  - MoveGroup reached `You can start planning now!`.
+  - `arm_controller` and `joint_state_broadcaster` activated.
+- Updated Isaac bringup behavior:
+  - `isaac_moveit.launch.py` now defaults to `hardware_type:=isaac_mock`, which uses `mock_components/GenericSystem` while preserving the Isaac bringup path.
+  - The real `hardware_type:=isaac` path still references `topic_based_ros2_control/TopicBasedSystem` and requires that external plugin to be installed.
+- Validated `isaac_moveit.launch.py use_rviz:=false` in default `isaac_mock` mode:
+  - `ARMSystem` initialized through `mock_components/GenericSystem`.
+  - `arm_controller` and `joint_state_broadcaster` activated.
+  - MoveGroup reached `You can start planning now!`.
+- Validated planning examples:
+  - `plan_to_joint_target` plan-only succeeded.
+  - `plan_to_pose_target` plan-only succeeded.
+- Validated kinematics examples:
+  - `fk_demo` succeeded and produced a `tool0` pose.
+  - `ik_demo` succeeded after changing its default target to a reachable FK-derived pose.
+
+### Code Fixes From Validation
+
+- Removed duplicate parameter auto-declaration in MoveIt demo nodes.
+- Added helper utilities in `arm_kinematics` and `arm_planning_examples` so `ros2 run` demos can auto-load:
+  - generated `robot_description` from `arm.urdf.xacro`
+  - `robot_description_semantic` from `arm.srdf`
+  - KDL kinematics parameters for `single_arm`
+- Reworked `fk_demo` and `ik_demo` to use MoveIt `RobotModelLoader` and `RobotState` directly, avoiding unnecessary dependency on the MoveGroup action server for local FK/IK tests.
+- Updated default IK and pose-planning targets to the reachable all-zero-joint FK pose:
+  - position `[0.020061, 0.000397, 0.549780]`
+  - orientation xyzw `[0.500000, 0.500000, 0.500002, 0.499998]`
+
+### Remaining Runtime Notes
+
+- In the Codex sandbox, DDS reports `getifaddrs: Operation not permitted` and FastDDS UDP socket warnings because network access is restricted. The tested nodes still reached the relevant ready/success states.
+- Launch commands in this environment need `ROS_LOG_DIR=/tmp/ros-log` because `~/.ros/log` is read-only in the sandbox.
+- MoveIt reports `No 3D sensor plugin(s) defined for octomap updates`; this is expected for the current no-depth-sensor configuration and does not block planning.
+- KDL warns that `base_link` has inertial data; this comes from the original SolidWorks URDF. Add a dummy root/world link later if KDL root inertial handling becomes important.
