@@ -23,6 +23,12 @@ Start from its README for build, launch, URDF analysis, MoveIt configuration, ro
 ros2_ws/src/arm_motion_stack/README.md
 ```
 
+Detailed implementation notes, launch topology, MoveIt troubleshooting, joint-state isolation, and future extension details are recorded in:
+
+```text
+ros2_ws/src/arm_motion_stack/docs/IMPLEMENTATION_DETAILS.md
+```
+
 ## Git Notes
 
 Generated colcon directories are ignored:

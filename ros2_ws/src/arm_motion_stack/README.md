@@ -12,6 +12,12 @@ The repository-level setup and this stack bootstrap are recorded in:
 /home/alienware/Desktop/PersonalProject/CHANGELOG.md
 ```
 
+Detailed implementation and troubleshooting notes are recorded in:
+
+```text
+ros2_ws/src/arm_motion_stack/docs/IMPLEMENTATION_DETAILS.md
+```
+
 ## Current URDF Source
 
 - Original source in this workspace: `/home/alienware/Desktop/PersonalProject/arm_description/urdf/ARM.urdf`

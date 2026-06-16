@@ -180,3 +180,8 @@ colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python
 - Confirmed `/arm_joint_states` is present during bringup. A global `/joint_states` may still exist if other publishers are running, so the isolated default remains intentional.
 - Note: MoveIt logs may still display the internal subscription name `joint_states`; the launch remap resolves it to `joint_states_topic`.
 - Remaining octomap log: `No 3D sensor plugin(s) defined for octomap updates`. This is expected until a real depth camera or point-cloud updater is configured and does not block the current planning stack.
+
+### Detailed Implementation Documentation
+
+- Added `ros2_ws/src/arm_motion_stack/docs/IMPLEMENTATION_DETAILS.md`.
+- Documented package responsibilities, URDF/xacro strategy, MoveIt configuration, ros2_control configuration, bringup launch topology, joint-state topic isolation, octomap runtime note, validation commands, and future extension paths for Isaac Sim, Pinocchio, Ruckig, dual-arm support, and real hardware.
