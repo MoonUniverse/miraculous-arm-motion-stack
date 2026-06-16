@@ -13,10 +13,10 @@
           <!-- Isaac topics are reserved in arm_control/config/isaac_ros2_controllers.yaml. -->
         </xacro:if>
         <xacro:if value="${hardware_type == 'isaac'}">
-          <!-- TODO: Replace this with the exact Isaac Sim hardware plugin used in your environment. -->
-          <plugin>topic_based_ros2_control/TopicBasedSystem</plugin>
+          <plugin>arm_control/IsaacTopicSystem</plugin>
           <param name="joint_commands_topic">/isaac_joint_commands</param>
           <param name="joint_states_topic">/isaac_joint_states</param>
+          <param name="state_timeout_sec">1.0</param>
         </xacro:if>
       </hardware>
 

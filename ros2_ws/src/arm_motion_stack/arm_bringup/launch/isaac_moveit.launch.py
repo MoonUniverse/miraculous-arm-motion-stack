@@ -14,6 +14,7 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration("use_rviz")
     hardware_type = LaunchConfiguration("hardware_type")
     joint_states_topic = LaunchConfiguration("joint_states_topic")
+    use_sim_time = LaunchConfiguration("use_sim_time")
     arm_description_share = get_package_share_directory("arm_description")
     robot_xacro = os.path.join(arm_description_share, "urdf", "arm.urdf.xacro")
 
@@ -28,11 +29,12 @@ def generate_launch_description():
         DeclareLaunchArgument("use_rviz", default_value="true"),
         DeclareLaunchArgument("hardware_type", default_value="isaac_mock"),
         DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
+        DeclareLaunchArgument("use_sim_time", default_value="true"),
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
             output="screen",
-            parameters=[robot_description],
+            parameters=[robot_description, {"use_sim_time": use_sim_time}],
             remappings=[("joint_states", joint_states_topic)],
         ),
         IncludeLaunchDescription(
@@ -42,19 +44,28 @@ def generate_launch_description():
             launch_arguments={
                 "hardware_type": hardware_type,
                 "joint_states_topic": joint_states_topic,
+                "use_sim_time": use_sim_time,
             }.items(),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(get_package_share_directory("arm_moveit_config"), "launch", "move_group.launch.py")
             ),
-            launch_arguments={"joint_states_topic": joint_states_topic}.items(),
+            launch_arguments={
+                "hardware_type": hardware_type,
+                "joint_states_topic": joint_states_topic,
+                "use_sim_time": use_sim_time,
+            }.items(),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(get_package_share_directory("arm_moveit_config"), "launch", "moveit_rviz.launch.py")
             ),
-            launch_arguments={"joint_states_topic": joint_states_topic}.items(),
+            launch_arguments={
+                "hardware_type": hardware_type,
+                "joint_states_topic": joint_states_topic,
+                "use_sim_time": use_sim_time,
+            }.items(),
             condition=IfCondition(use_rviz),
         ),
     ])

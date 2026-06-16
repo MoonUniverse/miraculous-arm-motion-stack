@@ -164,24 +164,94 @@ ros2 launch arm_bringup moveit_demo.launch.py joint_states_topic:=/joint_states
 MoveIt may still log the internal subscription name as `joint_states`; the
 launch remap resolves it to the selected topic.
 
-Isaac Sim reserved mode:
+Isaac Sim backend:
 
 ```bash
-ros2 launch arm_bringup isaac_moveit.launch.py
+cd /home/alienware/Desktop/PersonalProject/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ROS_LOG_DIR=/tmp/ros-log ros2 run arm_isaac_sim arm_isaac_ros_bridge.py
 ```
 
-The Isaac launch defaults to `hardware_type:=isaac_mock`, which uses `mock_components/GenericSystem` so the bringup path can be tested before the Isaac hardware plugin is installed. To select the reserved topic-based plugin later:
+In another terminal, start IsaacLab:
 
 ```bash
-ros2 launch arm_bringup isaac_moveit.launch.py hardware_type:=isaac
+cd /home/alienware/Documents/xlerobot/IsaacLab
+source /home/alienware/miniconda3/etc/profile.d/conda.sh
+conda activate env_isaaclab
+env TERM=xterm PYTHONDONTWRITEBYTECODE=1 ./isaaclab.sh -p \
+  /home/alienware/Desktop/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/scripts/arm_isaac_backend.py \
+  --backend_config /home/alienware/Desktop/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/config/arm_isaac_backend.yaml \
+  --headless --force_exit
 ```
 
-The true `hardware_type:=isaac` path uses the placeholder `topic_based_ros2_control/TopicBasedSystem` plugin and reserves:
+Then launch MoveIt/ros2_control against Isaac:
 
+```bash
+ROS_LOG_DIR=/tmp/ros-log ros2 launch arm_bringup isaac_moveit.launch.py \
+  hardware_type:=isaac use_sim_time:=true use_rviz:=false
+```
+
+The true `hardware_type:=isaac` path uses the local `arm_control/IsaacTopicSystem`
+ros2_control hardware plugin. IsaacLab runs in Python 3.11, while ROS Humble
+`rclpy` is Python 3.10, so the bridge is intentionally split into two processes:
+
+- ROS side: `arm_isaac_ros_bridge.py` translates ROS topics to localhost UDP.
+- Isaac side: `arm_isaac_backend.py` translates UDP to IsaacLab articulation commands.
 - Joint command topic: `/isaac_joint_commands`
 - Joint state topic: `/isaac_joint_states`
+- UDP command/state ports: `127.0.0.1:55100` and `127.0.0.1:55101`
 
-Replace the plugin and topic message contract with the exact Isaac Sim ROS 2 bridge or hardware interface used in your environment.
+The generated Isaac USD lives at:
+
+```text
+ros2_ws/src/arm_motion_stack/arm_description/usd/arm_isaac.usd
+```
+
+Drive tuning is recorded in `arm_isaac_sim/config/arm_isaac_drives.yaml`.
+
+### Isaac Closed-Loop Validation
+
+After the three Isaac backend terminals above are running, execute a MoveIt
+trajectory from a fourth ROS terminal:
+
+```bash
+cd /home/alienware/Desktop/PersonalProject/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ROS_LOG_DIR=/tmp/ros-log ros2 run arm_planning_examples plan_to_joint_target \
+  --ros-args -p execute:=true
+```
+
+Check that Isaac is receiving commands and publishing state:
+
+```bash
+ros2 topic echo /isaac_joint_commands
+ros2 topic echo /isaac_joint_states
+ros2 control list_controllers
+```
+
+Expected controller state:
+
+```text
+joint_state_broadcaster active
+arm_controller active
+```
+
+Useful diagnostics if execution stalls:
+
+```bash
+ros2 topic list | rg 'isaac|arm_controller|joint'
+ros2 action list | rg trajectory
+ros2 control list_hardware_interfaces
+ros2 control list_controllers
+```
+
+The closed loop is healthy when `plan_to_joint_target execute:=true` completes
+without controller/action errors, `/isaac_joint_commands` changes during
+execution, and `/isaac_joint_states` reports changing `J1` through `J6` values
+from the IsaacLab backend.
 
 ## FK / IK / Planning Demos
 
@@ -234,6 +304,10 @@ After installing the ROS Humble MoveIt/ros2_control dependencies, the following 
 - `plan_to_joint_target`
 - `plan_to_pose_target`
 - `moveit_demo.launch.py use_rviz:=false` after joint-state topic isolation; no stale `joint24` or gripper joint names were reported by MoveIt.
+- IsaacLab URDF-to-USD conversion generated `arm_description/usd/arm_isaac.usd`.
+- IsaacLab validation passed for USD checks, joint discovery, finite state, and position tracking; max observed validation error was about `0.0013 rad`.
+- `arm_isaac_backend.py --duration 2.0` started the IsaacLab UDP backend and exited cleanly.
+- `arm_isaac_ros_bridge.py` reached ready state outside the network-restricted sandbox.
 
 In this sandbox, use `ROS_LOG_DIR=/tmp/ros-log` because `~/.ros/log` is read-only.
 

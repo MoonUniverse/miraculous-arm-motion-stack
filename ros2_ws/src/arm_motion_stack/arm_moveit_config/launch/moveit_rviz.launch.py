@@ -24,7 +24,9 @@ def load_text(package_name, relative_path):
 
 
 def generate_launch_description():
+    hardware_type = LaunchConfiguration("hardware_type")
     joint_states_topic = LaunchConfiguration("joint_states_topic")
+    use_sim_time = LaunchConfiguration("use_sim_time")
     arm_description_share = get_package_share_directory("arm_description")
     moveit_config_share = get_package_share_directory("arm_moveit_config")
     robot_xacro = os.path.join(arm_description_share, "urdf", "arm.urdf.xacro")
@@ -32,7 +34,7 @@ def generate_launch_description():
 
     robot_description = {
         "robot_description": ParameterValue(
-            Command(["xacro ", robot_xacro, " hardware_type:=fake"]),
+            Command(["xacro ", robot_xacro, " hardware_type:=", hardware_type]),
             value_type=str,
         )
     }
@@ -43,10 +45,13 @@ def generate_launch_description():
         {"robot_description_planning": load_yaml("arm_moveit_config", "config/joint_limits.yaml")},
         load_yaml("arm_moveit_config", "config/ompl_planning.yaml"),
         load_yaml("arm_moveit_config", "config/controllers.yaml"),
+        {"use_sim_time": use_sim_time},
     ]
 
     return LaunchDescription([
+        DeclareLaunchArgument("hardware_type", default_value="fake"),
         DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
+        DeclareLaunchArgument("use_sim_time", default_value="false"),
         Node(
             package="rviz2",
             executable="rviz2",

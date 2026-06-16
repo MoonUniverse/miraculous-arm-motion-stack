@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-06-16
+
+### IsaacLab Backend Integration
+
+- Added generated Isaac USD asset:
+  - `ros2_ws/src/arm_motion_stack/arm_description/usd/arm_isaac.usd`
+- Added `arm_isaac_sim` package with:
+  - IsaacLab backend config and drive tuning YAML.
+  - USD drive patch script.
+  - IsaacLab validation script.
+  - IsaacLab UDP backend.
+  - ROS Humble UDP bridge node.
+- Added local `arm_control/IsaacTopicSystem` ros2_control hardware plugin.
+  - Publishes `/isaac_joint_commands` as `sensor_msgs/msg/JointState`.
+  - Reads `/isaac_joint_states` as `sensor_msgs/msg/JointState`.
+  - Keeps `J1..J6` order stable for the existing `arm_controller`.
+- Reworked Isaac launch path so `hardware_type:=isaac` is no longer an external placeholder.
+- Split Isaac/ROS bridging into two processes because `env_isaaclab` uses Python 3.11 while ROS Humble `rclpy` is Python 3.10.
+
+Validation:
+
+- Converted `/tmp/arm_isaac_abs.urdf` to `arm_isaac.usd` with IsaacLab `convert_urdf.py`.
+- Patched drive gains for `/ARM/joints/J1..J6`; cleaned a stale DriveAPI initially applied to same-name link `/ARM/J1`.
+- `validate_arm_isaaclab.py --headless --force_exit --steps 160` passed with max tracking error about `0.0013 rad`.
+- `arm_isaac_backend.py --duration 2.0` started the IsaacLab UDP backend and exited cleanly.
+- `arm_isaac_ros_bridge.py` reached ready state outside the network-restricted sandbox.
+- Full workspace build passed with system Python:
+
+```bash
+cd /home/alienware/Desktop/PersonalProject/ros2_ws
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+```
+
 ## 2026-06-15
 
 ### Repository Initialization

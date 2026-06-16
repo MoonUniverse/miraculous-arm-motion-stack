@@ -1,0 +1,23 @@
+usd_path: ../../arm_description/usd/arm_isaac.usd
+joint_names: [J1, J2, J3, J4, J5, J6]
+joint_commands_topic: /isaac_joint_commands
+joint_states_topic: /isaac_joint_states
+udp:
+  host: 127.0.0.1
+  command_port: 55100
+  state_port: 55101
+publish_rate_hz: 100.0
+command_timeout_sec: 1.0
+fixed_base: true
+num_envs: 1
+initial_joint_positions:
+  J1: 0.0
+  J2: 0.0
+  J3: 0.0
+  J4: 0.0
+  J5: 0.0
+  J6: 0.0
+articulation:
+  enabled_self_collisions: false
+  solver_position_iteration_count: 64
+  solver_velocity_iteration_count: 16

@@ -1,0 +1,31 @@
+joint_drives:
+  J1:
+    stiffness: 100.0
+    damping: 10.0
+    max_force: 120.0
+    target_type: position
+  J2:
+    stiffness: 100.0
+    damping: 10.0
+    max_force: 120.0
+    target_type: position
+  J3:
+    stiffness: 100.0
+    damping: 10.0
+    max_force: 100.0
+    target_type: position
+  J4:
+    stiffness: 80.0
+    damping: 8.0
+    max_force: 80.0
+    target_type: position
+  J5:
+    stiffness: 60.0
+    damping: 6.0
+    max_force: 60.0
+    target_type: position
+  J6:
+    stiffness: 40.0
+    damping: 4.0
+    max_force: 25.0
+    target_type: position

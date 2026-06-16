@@ -541,20 +541,66 @@ arm_description/urdf/ros2_control.xacro
 
 ### 15.3 Isaac Sim
 
-当前已预留：
+当前已实现固定基座 IsaacLab 后端：
 
 ```text
 hardware_type:=isaac
 /isaac_joint_commands
 /isaac_joint_states
+arm_description/usd/arm_isaac.usd
+arm_isaac_sim/config/arm_isaac_backend.yaml
+arm_isaac_sim/config/arm_isaac_drives.yaml
+```
+
+实现要点：
+
+- `hardware_type:=isaac` 使用本仓库 `arm_control/IsaacTopicSystem`，不是外部 `topic_based_ros2_control`。
+- ROS side 使用 `arm_isaac_ros_bridge.py`，运行在 ROS Humble Python 3.10 中。
+- Isaac side 使用 `arm_isaac_backend.py`，运行在 `env_isaaclab` / IsaacLab Python 3.11 中。
+- 两边通过 localhost UDP 通信，避开 ROS Humble `rclpy` 与 IsaacLab Python 3.11 的 ABI 冲突。
+- joint order 固定为 `J1..J6`。
+- 当前控制接口为 position command；状态接口为 position / velocity。
+
+已验证：
+
+- IsaacLab converter 生成 `arm_isaac.usd`。
+- drive patch 写入 `/ARM/joints/J1..J6`，并处理了 `J1` link/joint 同名问题。
+- `validate_arm_isaaclab.py --headless --force_exit --steps 160` 结果为 `OVERALL PASS`。
+- 最大跟踪误差约 `0.0013 rad`。
+- `arm_isaac_backend.py --duration 2.0` 可启动并退出。
+- `colcon build --symlink-install` 通过。
+
+运行顺序：
+
+```bash
+# Terminal 1: ROS UDP bridge
+cd /home/alienware/Desktop/PersonalProject/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ROS_LOG_DIR=/tmp/ros-log ros2 run arm_isaac_sim arm_isaac_ros_bridge.py
+
+# Terminal 2: IsaacLab backend
+cd /home/alienware/Documents/xlerobot/IsaacLab
+source /home/alienware/miniconda3/etc/profile.d/conda.sh
+conda activate env_isaaclab
+env TERM=xterm PYTHONDONTWRITEBYTECODE=1 ./isaaclab.sh -p \
+  /home/alienware/Desktop/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/scripts/arm_isaac_backend.py \
+  --backend_config /home/alienware/Desktop/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/config/arm_isaac_backend.yaml \
+  --headless --force_exit
+
+# Terminal 3: MoveIt + ros2_control
+cd /home/alienware/Desktop/PersonalProject/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ROS_LOG_DIR=/tmp/ros-log ros2 launch arm_bringup isaac_moveit.launch.py \
+  hardware_type:=isaac use_sim_time:=true use_rviz:=false
 ```
 
 后续需要：
 
-- 确认 Isaac Sim ROS 2 bridge 的消息类型。
-- 替换 `topic_based_ros2_control/TopicBasedSystem` 为实际可用 hardware plugin。
-- 对齐 Isaac articulation joint order 和 ROS 2 joint order。
-- 验证 `/arm_controller/follow_joint_trajectory` 到 Isaac articulation 的闭环。
+- 用真实电机参数替换临时 drive stiffness / damping / max_force。
+- 补真实 velocity / acceleration / effort limit。
+- 验证 `/arm_controller/follow_joint_trajectory` 到 Isaac articulation 的长轨迹闭环。
 
 ### 15.4 Pinocchio
 
@@ -608,4 +654,3 @@ Eigen::VectorXd computeInverseDynamics(
 controller: arm_controller
 joints: J1, J2, J3, J4, J5, J6
 ```
-

@@ -1,0 +1,11 @@
+<library path="arm_control">
+  <class
+    name="arm_control/IsaacTopicSystem"
+    type="arm_control::IsaacTopicSystem"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      ros2_control hardware bridge that publishes Isaac joint position commands
+      and reads Isaac joint states over sensor_msgs/JointState topics.
+    </description>
+  </class>
+</library>
