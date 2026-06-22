@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-06-22
+
+### miraculous_driver ROS 2 Package
+
+- Added `miraculous_driver` package wrapping the `miraculous_sdk` (CANopen/CiA402) for the ARM 6DOF manipulator.
+- Core library `MiraculousArm` (C++ wrapper):
+  - Manages 6 `MiraMotor` handles on a single CAN bus (node IDs 1–6).
+  - Lifecycle: `init()` (open + bootstrap, not enabled), `init_passive()` (teach mode, motors de-energized), `enable_csp()`, `disable()`, `quick_stop()`, `fault_reset()`, `shutdown()`.
+  - Background read thread at configurable rate (default 100 Hz) polls position/velocity/state via mutex-cached buffers.
+  - CSP write: `csp_set_target` per motor with `manual=true` (SDK does not auto-send SYNC), followed by a single unified SYNC broadcast (CAN ID 0x80).
+  - Unit conversion: `rad = pulse / pulses_per_radian` per joint.
+  - EMCY detection via CAN receive callback (filters 0x081–0x0FF).
+- ros2_control hardware plugin `miraculous_driver/MiraculousSystem`:
+  - Implements `hardware_interface::SystemInterface` (on_init/on_configure/on_activate/on_deactivate/on_cleanup/read/write).
+  - Seeds position commands from real encoder readings on configure to prevent jump on activate.
+  - Registered via `pluginlib_export_plugin_description_file`.
+- `ros2_control.xacro` updated with `hardware_type == 'real'` branch.
+- Teach/record node (`teach_record_node`):
+  - Opens motors in passive mode (free to drag).
+  - Publishes `/arm_joint_states` (sensor_msgs/JointState).
+  - Records 6 joint angles to CSV at configurable rate (default 50 Hz).
+  - Services: `/teach/start`, `/teach/stop`.
+- Playback node (`playback_node`):
+  - Loads CSV trajectory and replays via CSP mode at recorded rate.
+  - Services: `/playback/play`, `/playback/stop`.
+  - Supports `speed_scale` and `loop` parameters.
+- Launch files: `real_control.launch.py`, `moveit_real.launch.py`, `teach.launch.py`, `playback.launch.py`.
+- Config files: `real_ros2_controllers.yaml`, `miraculous_arm_params.yaml` (pulses_per_radian placeholder for user to fill).
+- CMakeLists auto-selects SDK based on host architecture: `miraculous_sdk_x86_64` for x86-64 dev host, `miraculous_sdk` for ARM aarch64 target.
+- Build verified:
+
+```bash
+cd /home/alienware/Desktop/PersonalProject/ros2_ws
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select miraculous_driver --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+```
+
+- Plugin discovery confirmed; executables registered as `miraculous_driver teach_record_node` and `miraculous_driver playback_node`.
+- Next steps: fill in real `pulses_per_radian` values in `miraculous_arm_params.yaml`; test on ARM target with real CAN bus.
+
 ## 2026-06-16
 
 ### IsaacLab Backend Integration

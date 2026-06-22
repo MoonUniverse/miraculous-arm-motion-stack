@@ -18,6 +18,16 @@
           <param name="joint_states_topic">/isaac_joint_states</param>
           <param name="state_timeout_sec">1.0</param>
         </xacro:if>
+        <xacro:if value="${hardware_type == 'real'}">
+          <plugin>miraculous_driver/MiraculousSystem</plugin>
+          <param name="can_interface">can0</param>
+          <param name="baudrate">1000</param>
+          <param name="node_ids">1,2,3,4,5,6</param>
+          <!-- pulses_per_radian = counts_per_rev * gear_ratio / (2*pi). TODO: replace with real per-joint values. -->
+          <param name="pulses_per_radian">1000.0,1000.0,1000.0,1000.0,1000.0,1000.0</param>
+          <param name="sync_period_us">0</param>
+          <param name="read_rate_hz">100.0</param>
+        </xacro:if>
       </hardware>
 
       <joint name="J1">

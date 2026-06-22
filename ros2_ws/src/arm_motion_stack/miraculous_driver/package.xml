@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>miraculous_driver</name>
+  <version>0.1.0</version>
+  <description>
+    ROS 2 hardware driver wrapping the miraculous_sdk (CANopen/CiA402) for the
+    ARM 6DOF manipulator. Provides a ros2_control SystemInterface plugin for
+    MoveIt, plus teach-record / playback nodes.
+  </description>
+  <maintainer email="todo@example.com">TODO</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
+
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>joint_trajectory_controller</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>ros2_control</exec_depend>
+  <exec_depend>ros2_controllers</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

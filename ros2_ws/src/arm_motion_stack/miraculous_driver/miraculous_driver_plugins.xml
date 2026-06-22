@@ -1,0 +1,13 @@
+<library path="miraculous_driver">
+  <class
+    name="miraculous_driver/MiraculousSystem"
+    type="miraculous_driver::MiraculousSystem"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      ros2_control hardware plugin that drives the ARM 6DOF manipulator through
+      the miraculous_sdk over CANopen CSP (cyclic synchronous position) mode.
+      Manages 6 MiraMotor handles, performs radian/pulse conversion and a unified
+      SYNC broadcast for synchronized multi-axis motion.
+    </description>
+  </class>
+</library>

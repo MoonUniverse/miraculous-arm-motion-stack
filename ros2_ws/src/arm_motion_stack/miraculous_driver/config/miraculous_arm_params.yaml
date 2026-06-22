@@ -1,0 +1,18 @@
+# Miraculous arm motor parameters.
+#
+# This file documents the hardware parameters consumed by the teach_record /
+# playback nodes (and equivalently by the MiraculousSystem xacro params).
+#
+# CRITICAL: pulses_per_radian must be filled with the real per-joint values:
+#   pulses_per_radian = counts_per_rev * gear_ratio / (2*pi)
+# Replace the placeholder values below before driving the real arm.
+miraculous_driver:
+  ros__parameters:
+    can_interface: "can0"
+    baudrate: 1000
+    node_ids: "1,2,3,4,5,6"
+    # TODO: replace with real per-joint pulses_per_radian (6 comma-separated values).
+    pulses_per_radian: "1000.0,1000.0,1000.0,1000.0,1000.0,1000.0"
+    sync_period_us: 0
+    read_rate_hz: 100.0
+    joint_states_topic: "/arm_joint_states"
