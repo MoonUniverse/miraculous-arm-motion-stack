@@ -249,21 +249,14 @@ bool MiraculousArm::set_targets_rad(const std::array<double, kArmJoints> & targe
 {
   std::array<double, kArmJoints> clamped = targets;
   check_limits(clamped);
-  std::array<int32_t, kArmJoints> pulses{};
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    pulses[i] = rad_to_pulse(clamped[i], i);
-  }
-  return set_targets_pulse(pulses);
-}
-
-bool MiraculousArm::set_targets_pulse(const std::array<int32_t, kArmJoints> & targets)
-{
   if (!initialized_) {
     return false;
   }
   bool ok = true;
   for (size_t i = 0; i < kArmJoints; ++i) {
-    if (miraculous_motor_csp_set_target(motors_[i], targets[i]) < 0) {
+    if (miraculous_motor_csp_set_target_ex(motors_[i],
+                                            static_cast<float>(clamped[i]),
+                                            POS_UNIT_RADIAN) < 0) {
       ok = false;
     }
   }
@@ -274,6 +267,17 @@ bool MiraculousArm::set_targets_pulse(const std::array<int32_t, kArmJoints> & ta
     send_sync();
   }
   return ok;
+}
+
+bool MiraculousArm::set_targets_pulse(const std::array<int32_t, kArmJoints> & targets)
+{
+  // Deprecated: use set_targets_rad() with SDK _ex API for better precision.
+  // This function converts pulses back to radians and calls set_targets_rad().
+  std::array<double, kArmJoints> targets_rad{};
+  for (size_t i = 0; i < kArmJoints; ++i) {
+    targets_rad[i] = pulse_to_rad(targets[i], i);
+  }
+  return set_targets_rad(targets_rad);
 }
 
 void MiraculousArm::send_sync()
@@ -337,7 +341,7 @@ void MiraculousArm::read_loop()
   const std::chrono::microseconds period(period_us);
   auto next_wake = clock::now();
 
-  std::array<int32_t, kArmJoints> pos_pulse{};
+  std::array<float, kArmJoints> pos_rad{};
   std::array<int32_t, kArmJoints> vel_pulse{};
   std::array<Cia402State_t, kArmJoints> states{};
 
@@ -348,12 +352,13 @@ void MiraculousArm::read_loop()
       if (!motors_[i]) {
         continue;
       }
-      int32_t p = 0, v = 0;
+      float p_rad = 0.0f;
+      int32_t v = 0;
       Cia402State_t s = CIA_STATE_NOT_READY_TO_SWITCH_ON;
-      miraculous_motor_get_position(motors_[i], &p);
+      miraculous_motor_get_position_ex(motors_[i], &p_rad, POS_UNIT_RADIAN);
       miraculous_motor_get_velocity(motors_[i], &v);
       miraculous_motor_get_state(motors_[i], &s);
-      pos_pulse[i] = p;
+      pos_rad[i] = p_rad;
       vel_pulse[i] = v;
       states[i] = s;
     }
@@ -365,8 +370,9 @@ void MiraculousArm::read_loop()
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       for (size_t i = 0; i < kArmJoints; ++i) {
-        cached_pos_pulse_[i] = pos_pulse[i];
-        cached_pos_rad_[i] = pulse_to_rad(pos_pulse[i], i);
+        cached_pos_rad_[i] = static_cast<double>(pos_rad[i]);
+        // Also cache pulse values for compatibility (using pulses_per_radian)
+        cached_pos_pulse_[i] = rad_to_pulse(cached_pos_rad_[i], i);
         cached_vel_rad_[i] =
           (config_.joints[i].pulses_per_radian > 0.0)
             ? static_cast<double>(vel_pulse[i]) / config_.joints[i].pulses_per_radian
@@ -415,6 +421,9 @@ void MiraculousArm::can_recv_trampoline(
 }
 
 // ============================ unit conversion =============================
+// NOTE: These functions are kept for backward compatibility (e.g., set_targets_pulse).
+// New code should prefer SDK _ex API (csp_set_target_ex, get_position_ex) which
+// handles unit conversion internally with encoder bit-width precision.
 
 int32_t MiraculousArm::rad_to_pulse(double rad, size_t i) const
 {

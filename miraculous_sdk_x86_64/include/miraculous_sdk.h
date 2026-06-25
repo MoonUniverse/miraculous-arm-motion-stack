@@ -148,6 +148,7 @@ typedef enum {
     CIA402_OD_MIT_CONTROL               = 0x2005,
     CIA402_OD_SERVO_TEMPERATURE         = 0x2006,
     CIA402_OD_MIT_TORQUE_LIMIT          = 0x2102,
+    CIA402_OD_HOME_OFFSET               = 0x607C,
 } Cia402OdIndex_t;
 
 /*--- CiA402 操作模式 ---*/
@@ -172,6 +173,16 @@ typedef enum {
     CIA_PROFILE_LINEAR = 0,  /*!< T 型曲线 (梯形) */
     CIA_PROFILE_SCURVE = 1,  /*!< S 型曲线 (正弦) */
 } CiaProfileType_t;
+
+/**
+ * @brief 位置单位枚举
+ *
+ * 用于 miraculous_motor_get_position_ex() 指定返回值的单位。
+ */
+typedef enum {
+    POS_UNIT_DEGREE = 0,  /*!< 角度 (度) */
+    POS_UNIT_RADIAN = 1,  /*!< 弧度 (rad) */
+} PosUnit_t;
 
 /*--- CiA402 PDS 状态 ---*/
 typedef enum {
@@ -726,6 +737,26 @@ int miraculous_motor_csp_init(MiraMotor *motor, uint32_t sync_period_us, bool ma
  */
 int miraculous_motor_csp_set_target(MiraMotor *motor, int32_t target_pos);
 
+/**
+ * @brief CSP 模式设置目标位置, 支持角度/弧度单位
+ *
+ * 将角度或弧度值转换为编码器脉冲后, 通过 PDO 写入目标位置。
+ * 转换公式:
+ *   脉冲数 = 角度 × 2^bw / 360°
+ *   脉冲数 = 弧度 × 2^bw / 2π
+ *
+ * @param motor      电机句柄
+ * @param target_pos 目标位置, 根据 unit 参数决定单位
+ * @param unit       单位枚举: POS_UNIT_DEGREE 或 POS_UNIT_RADIAN
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * miraculous_motor_csp_set_target_ex(motor, 90.0f, POS_UNIT_DEGREE);
+ * @endcode
+ */
+int miraculous_motor_csp_set_target_ex(MiraMotor *motor, float target_pos, PosUnit_t unit);
+
 /*--- CSV 周期同步速度模式 ---*/
 
 /**
@@ -847,6 +878,96 @@ int miraculous_motor_mit_set_target(MiraMotor *motor, int32_t target_pos);
  * @return 成功返回 0, 失败返回其他
  */
 int miraculous_motor_get_position(MiraMotor *motor, int32_t *pos);
+
+/**
+ * @brief 读取电机实际位置并转换单位 (0x6064)
+ *
+ * 根据指定的单位 (度/弧度) 返回实际位置。
+ * 转换公式:
+ *   角度 = 脉冲数 × 360° / 2^bw
+ *   弧度 = 脉冲数 × 2π / 2^bw
+ * 其中 bw 为编码器位宽, 默认 19 (524288 counts/rev),
+ * 可通过 miraculous_motor_set_encoder_bw() 修改。
+ *
+ * @param motor 电机句柄
+ * @param pos   输出: 实际位置 (float), 根据 unit 参数决定单位
+ * @param unit  单位枚举: POS_UNIT_DEGREE 或 POS_UNIT_RADIAN
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * float pos_deg, pos_rad;
+ * miraculous_motor_get_position_ex(motor, &pos_deg, POS_UNIT_DEGREE);
+ * miraculous_motor_get_position_ex(motor, &pos_rad, POS_UNIT_RADIAN);
+ * @endcode
+ */
+int miraculous_motor_get_position_ex(MiraMotor *motor, float *pos, PosUnit_t unit);
+
+/**
+ * @brief 设置电机目标位置并转换单位 (0x607A)
+ *
+ * 根据指定的单位 (度/弧度) 设置目标位置。
+ * 内部将角度值转换为编码器脉冲后写入 0x607A。
+ * 转换公式:
+ *   脉冲数 = 角度 × 2^bw / 360°
+ *   脉冲数 = 弧度 × 2^bw / 2π
+ * 其中 bw 为编码器位宽, 默认 19 (524288 counts/rev)。
+ *
+ * @param motor 电机句柄
+ * @param pos   目标位置, 根据 unit 参数决定单位
+ * @param unit  单位枚举: POS_UNIT_DEGREE 或 POS_UNIT_RADIAN
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * miraculous_motor_set_target_position_ex(motor, 90.0f, POS_UNIT_DEGREE);  // 转 90°
+ * miraculous_motor_set_target_position_ex(motor, 3.14159f, POS_UNIT_RADIAN); // 转 π rad
+ * @endcode
+ */
+int miraculous_motor_set_target_position_ex(MiraMotor *motor, float pos, PosUnit_t unit);
+
+/**
+ * @brief 将当前位置设为零点 (0x607C)
+ *
+ * 先将 CiA402 Home Offset (0x607C) 复位为 0, 读取当前实际位置 (0x6064),
+ * 再将读到的位置值写入 Home Offset。
+ * 固件计算公式: ActualPosition = RawPosition - HomeOffset,
+ * 因此 HomeOffset = 当前 RawPosition 即可使当前位置归零。
+ *
+ * 如需掉电保持, 请在调用后执行 miraculous_motor_save_config()。
+ *
+ * @param motor 电机句柄
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * int ret = miraculous_motor_set_zero_position(motor);
+ * if (ret == 0) {
+ *     printf("Zero position set\n");
+ *     miraculous_motor_save_config(motor);  // 掉电保持
+ * }
+ * @endcode
+ */
+int miraculous_motor_set_zero_position(MiraMotor *motor);
+
+/**
+ * @brief 设置编码器位宽 (分辨率)
+ *
+ * 配置用于 miraculous_motor_get_position_ex() 位置单位转换的编码器分辨率。
+ * 分辨率 = 2^bw counts/revolution。
+ * 默认值为 19 (即 524288 counts/rev), 通常无需调用。
+ * 仅当编码器硬件位宽与默认值不同时才需设置。
+ *
+ * @param motor 电机句柄
+ * @param bw    编码器位宽 (有效范围 1~31)
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * miraculous_motor_set_encoder_bw(motor, 17);  // 17-bit, 131072 counts/rev
+ * @endcode
+ */
+int miraculous_motor_set_encoder_bw(MiraMotor *motor, uint8_t bw);
 
 /**
  * @brief 读取电机实际速度 (0x606C)

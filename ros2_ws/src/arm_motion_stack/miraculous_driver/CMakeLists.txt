@@ -84,6 +84,13 @@ target_link_libraries(playback_node ${PROJECT_NAME})
 ament_target_dependencies(playback_node rclcpp sensor_msgs std_srvs)
 set_target_properties(playback_node PROPERTIES INSTALL_RPATH "$ORIGIN")
 
+# ---- trajectory tracking test executable ----
+add_executable(trajectory_tracking_test_node src/trajectory_tracking_test_node.cpp)
+target_include_directories(trajectory_tracking_test_node PRIVATE ${MIRACULOUS_SDK_DIR}/include)
+target_link_libraries(trajectory_tracking_test_node ${PROJECT_NAME})
+ament_target_dependencies(trajectory_tracking_test_node rclcpp sensor_msgs std_srvs)
+set_target_properties(trajectory_tracking_test_node PROPERTIES INSTALL_RPATH "$ORIGIN")
+
 # ---- pluginlib export ----
 pluginlib_export_plugin_description_file(hardware_interface miraculous_driver_plugins.xml)
 
@@ -99,7 +106,7 @@ install(
 
 # Executables: install to lib/<pkg> (ros2 run expects them here).
 install(
-  TARGETS teach_record_node playback_node
+  TARGETS teach_record_node playback_node trajectory_tracking_test_node
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -108,6 +115,7 @@ install(FILES "${MIRACULOUS_SDK_DIR}/lib/libmiraculous_sdk.so" DESTINATION lib)
 
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS scripts/plot_trajectory.py DESTINATION lib/${PROJECT_NAME})
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(

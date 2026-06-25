@@ -27,9 +27,35 @@
 | `miraculous_sdk/` | ARM aarch64 | 目标设备 (实机运行) |
 | `miraculous_sdk_x86_64/` | x86-64 | 开发主机 (编译验证) |
 
-**重要**: x86_64 版 SDK 的 `miraculous_motor_csp_init()` 比 ARM 版多一个 `bool manual` 参数:
-- `manual=true` — SDK 不自动发 SYNC, wrapper 手动统一发送 (当前使用)
-- `manual=false` — SDK 内部定时器发 SYNC
+#### SDK API 升级 (2026-06-25)
+
+SDK 新增了 `_ex` 后缀函数，支持直接使用弧度/角度单位，无需手动转换：
+
+**新增 API:**
+```c
+// CSP 设置目标（带单位）
+int miraculous_motor_csp_set_target_ex(MiraMotor *motor, float target_pos, PosUnit_t unit);
+
+// 读取位置（带单位）
+int miraculous_motor_get_position_ex(MiraMotor *motor, float *pos, PosUnit_t unit);
+
+// 编码器位宽配置（默认 19 位 = 524288 counts/rev）
+int miraculous_motor_set_encoder_bw(MiraMotor *motor, uint8_t bw);
+```
+
+**单位枚举:**
+```c
+typedef enum {
+    POS_UNIT_DEGREE = 0,  // 角度 (度)
+    POS_UNIT_RADIAN = 1,  // 弧度 (rad)
+} PosUnit_t;
+```
+
+**ROS 2 代码适配:**
+- `MiraculousArm::read_loop()` — 后台线程改用 `get_position_ex(..., POS_UNIT_RADIAN)` 直接读取弧度
+- `MiraculousArm::set_targets_rad()` — CSP 下发改用 `csp_set_target_ex(..., POS_UNIT_RADIAN)` 直接发送弧度
+- `rad_to_pulse()` / `pulse_to_rad()` — 保留用于向后兼容 (`set_targets_pulse()`)，但标记为已弃用
+- **优势**: SDK 内部使用 `2^bw` 精确计算，消除手动转换误差，代码更简洁
 
 ---
 
@@ -78,10 +104,7 @@ MiraculousSystem (ros2_control SystemInterface)
     │  position_commands_[6]
     ▼
 MiraculousArm (C++ wrapper)
-    │  rad → pulse 转换, 限位 clamp
-    ▼
-miraculous_sdk (C SDK)
-    │  csp_set_target(motor, target_pulse) × 6
+    │  set_targets_rad() → csp_set_target_ex(..., POS_UNIT_RADIAN) × 6 (SDK _ex API)
     │  can_send(0x080, null, 0)  ← 统一 SYNC
     ▼
 CAN 总线 → 6 个电机
@@ -92,11 +115,11 @@ CAN 总线 → 6 个电机
 ```
 MiraculousArm::read_loop() [独立线程, 100Hz]
     │  循环:
-    │    1. get_position(motor[i]) × 6  → pulse
+    │    1. get_position_ex(motor[i], &pos_rad, POS_UNIT_RADIAN) × 6  → rad (SDK _ex API)
     │    2. get_velocity(motor[i]) × 6  → pulse/s
     │    3. get_state(motor[i])   × 6  → Cia402State_t
     │    4. motor_poll(motor[0], 0)    → 处理 CAN 事件/EMCY 回调
-    │    5. mutex lock → 缓存更新
+    │    5. mutex lock → 缓存更新 (rad + pulse)
     │    6. sleep_until(next_period)
     ▼
 read() 调用方 (ros2_control / teach / playback)
