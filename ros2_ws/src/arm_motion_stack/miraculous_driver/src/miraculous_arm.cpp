@@ -27,20 +27,27 @@ bool MiraculousArm::init(const ArmConfig & config)
     return true;
   }
   config_ = config;
-  if (config_.joints.size() != kArmJoints) {
+  if (config_.joints.empty() || config_.joints.size() > kArmJoints) {
     std::fprintf(stderr,
-      "[miraculous_arm] init: expected %zu joints, got %zu\n",
+      "[miraculous_arm] init: expected 1..%zu configured joints, got %zu\n",
       kArmJoints, config_.joints.size());
     return false;
   }
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    if (config_.joints[i].reduction_ratio <= 0.0) {
+  std::array<bool, kArmJoints> seen{};
+  for (const auto & joint : config_.joints) {
+    if (joint.joint_index >= kArmJoints) {
       std::fprintf(stderr,
-        "[miraculous_arm] init: joint %zu (%s) has invalid reduction_ratio=%g\n",
-        i, config_.joints[i].name.c_str(),
-        config_.joints[i].reduction_ratio);
+        "[miraculous_arm] init: joint %s has invalid joint_index=%zu\n",
+        joint.name.c_str(), joint.joint_index);
       return false;
     }
+    if (seen[joint.joint_index]) {
+      std::fprintf(stderr,
+        "[miraculous_arm] init: duplicate joint_index=%zu\n",
+        joint.joint_index);
+      return false;
+    }
+    seen[joint.joint_index] = true;
   }
   if (!open_motors()) {
     return false;
@@ -48,11 +55,11 @@ bool MiraculousArm::init(const ArmConfig & config)
   // Bring NMT to Operational so encoder objects (0x6064/0x606C) are readable
   // even before the power stage is enabled. Best-effort: a failed bootstrap on
   // one joint does not abort the others.
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    if (miraculous_motor_bootstrap(motors_[i], 3000) < 0) {
+  for (const auto & joint : config_.joints) {
+    if (miraculous_motor_bootstrap(motors_[joint.joint_index], 3000) < 0) {
       std::fprintf(stderr,
-        "[miraculous_arm] init: bootstrap failed for joint %zu (node %u)\n",
-        i, config_.joints[i].node_id);
+        "[miraculous_arm] init: bootstrap failed for joint %s (node %u)\n",
+        joint.name.c_str(), joint.node_id);
     }
   }
   passive_ = false;
@@ -76,11 +83,11 @@ void MiraculousArm::shutdown()
 {
   stop_read_thread();
   if (initialized_) {
-    for (size_t i = 0; i < kArmJoints; ++i) {
-      if (motors_[i]) {
-        miraculous_motor_shutdown(motors_[i]);
-        miraculous_motor_close(motors_[i]);
-        motors_[i] = nullptr;
+    for (auto *& motor : motors_) {
+      if (motor) {
+        miraculous_motor_shutdown(motor);
+        miraculous_motor_close(motor);
+        motor = nullptr;
       }
     }
     can_ctx_ = nullptr;
@@ -91,36 +98,30 @@ void MiraculousArm::shutdown()
 
 bool MiraculousArm::open_motors()
 {
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    motors_[i] = miraculous_motor_open(
+  for (const auto & joint : config_.joints) {
+    motors_[joint.joint_index] = miraculous_motor_open(
       config_.can_interface.c_str(), config_.baudrate,
-      config_.joints[i].node_id);
-    if (!motors_[i]) {
+      joint.node_id);
+    if (!motors_[joint.joint_index]) {
       std::fprintf(stderr,
-        "[miraculous_arm] open: failed to open joint %zu (node %u) on %s\n",
-        i, config_.joints[i].node_id, config_.can_interface.c_str());
-      for (size_t j = 0; j < i; ++j) {
-        miraculous_motor_close(motors_[j]);
-        motors_[j] = nullptr;
-      }
-      return false;
-    }
-    if (miraculous_motor_set_reduction_ratio(
-        motors_[i], static_cast<float>(config_.joints[i].reduction_ratio)) < 0)
-    {
-      std::fprintf(stderr,
-        "[miraculous_arm] open: failed to set reduction ratio for joint %zu (node %u)\n",
-        i, config_.joints[i].node_id);
-      miraculous_motor_close(motors_[i]);
-      motors_[i] = nullptr;
-      for (size_t j = 0; j < i; ++j) {
-        miraculous_motor_close(motors_[j]);
-        motors_[j] = nullptr;
+        "[miraculous_arm] open: failed to open joint %s (node %u) on %s\n",
+        joint.name.c_str(), joint.node_id, config_.can_interface.c_str());
+      for (auto *& motor : motors_) {
+        if (motor) {
+          miraculous_motor_close(motor);
+          motor = nullptr;
+        }
       }
       return false;
     }
   }
-  can_ctx_ = miraculous_motor_get_can_ctx(motors_[0]);
+  can_ctx_ = nullptr;
+  for (auto * motor : motors_) {
+    if (motor) {
+      can_ctx_ = miraculous_motor_get_can_ctx(motor);
+      break;
+    }
+  }
   // Register a shared CAN receive callback for EMCY detection.
   if (can_ctx_) {
     miraculous_can_set_recv_callback(can_ctx_, &MiraculousArm::can_recv_trampoline, this);
@@ -137,18 +138,22 @@ bool MiraculousArm::enable_csp()
   }
   // Bootstrap (NMT Operational) is already done in init(); here we only enable
   // the power stage and switch to CSP.
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    if (miraculous_motor_full_enable(motors_[i]) < 0) {
-      std::fprintf(stderr, "[miraculous_arm] enable_csp: enable failed joint %zu\n", i);
+  for (const auto & joint : config_.joints) {
+    auto * motor = motors_[joint.joint_index];
+    if (miraculous_motor_full_enable(motor) < 0) {
+      std::fprintf(stderr, "[miraculous_arm] enable_csp: enable failed joint %s\n",
+        joint.name.c_str());
       return false;
     }
-    if (miraculous_motor_set_mode(motors_[i], CIA_MODE_CSP) < 0) {
-      std::fprintf(stderr, "[miraculous_arm] enable_csp: set CSP mode failed joint %zu\n", i);
+    if (miraculous_motor_set_mode(motor, CIA_MODE_CSP) < 0) {
+      std::fprintf(stderr, "[miraculous_arm] enable_csp: set CSP mode failed joint %s\n",
+        joint.name.c_str());
       return false;
     }
     const bool manual_sync = (config_.sync_period_us == 0);
-    if (miraculous_motor_csp_init(motors_[i], config_.sync_period_us, manual_sync) < 0) {
-      std::fprintf(stderr, "[miraculous_arm] enable_csp: csp_init failed joint %zu\n", i);
+    if (miraculous_motor_csp_init(motor, config_.sync_period_us, manual_sync) < 0) {
+      std::fprintf(stderr, "[miraculous_arm] enable_csp: csp_init failed joint %s\n",
+        joint.name.c_str());
       return false;
     }
   }
@@ -166,8 +171,8 @@ bool MiraculousArm::enable()
   if (!initialized_) {
     return false;
   }
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    if (miraculous_motor_full_enable(motors_[i]) < 0) {
+  for (const auto & joint : config_.joints) {
+    if (miraculous_motor_full_enable(motors_[joint.joint_index]) < 0) {
       return false;
     }
   }
@@ -179,12 +184,12 @@ void MiraculousArm::disable()
   if (!initialized_) {
     return;
   }
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    if (motors_[i]) {
+  for (const auto & joint : config_.joints) {
+    if (motors_[joint.joint_index]) {
       if (config_.sync_period_us != 0) {
-        miraculous_motor_sync_stop(motors_[i]);
+        miraculous_motor_sync_stop(motors_[joint.joint_index]);
       }
-      miraculous_motor_disable(motors_[i]);
+      miraculous_motor_disable(motors_[joint.joint_index]);
     }
   }
 }
@@ -194,9 +199,9 @@ void MiraculousArm::quick_stop()
   if (!initialized_) {
     return;
   }
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    if (motors_[i]) {
-      miraculous_motor_quick_stop(motors_[i]);
+  for (const auto & joint : config_.joints) {
+    if (motors_[joint.joint_index]) {
+      miraculous_motor_quick_stop(motors_[joint.joint_index]);
     }
   }
 }
@@ -207,8 +212,8 @@ bool MiraculousArm::fault_reset()
     return false;
   }
   bool ok = true;
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    if (miraculous_motor_fault_reset(motors_[i]) < 0) {
+  for (const auto & joint : config_.joints) {
+    if (miraculous_motor_fault_reset(motors_[joint.joint_index]) < 0) {
       ok = false;
     }
   }
@@ -258,11 +263,11 @@ bool MiraculousArm::set_targets_rad(const std::array<double, kArmJoints> & targe
     return false;
   }
   bool ok = true;
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    const double motor_target_rad = clamped[i] * config_.joints[i].reduction_ratio;
-    if (miraculous_motor_csp_set_target_ex(motors_[i],
-                                            static_cast<float>(motor_target_rad),
-                                            POS_UNIT_RADIAN) < 0) {
+  for (const auto & joint : config_.joints) {
+    const size_t i = joint.joint_index;
+    if (miraculous_motor_csp_set_target_ex(
+        motors_[i], static_cast<float>(clamped[i]), POS_UNIT_RADIAN) < 0)
+    {
       ok = false;
     }
   }
@@ -275,8 +280,11 @@ bool MiraculousArm::set_targets_rad(const std::array<double, kArmJoints> & targe
 
 void MiraculousArm::send_sync()
 {
-  if (motors_[0]) {
-    miraculous_motor_sync_send(motors_[0]);
+  for (auto * motor : motors_) {
+    if (motor) {
+      miraculous_motor_sync_send(motor);
+      return;
+    }
   }
 }
 
@@ -285,9 +293,10 @@ void MiraculousArm::send_sync()
 bool MiraculousArm::check_limits(std::array<double, kArmJoints> & targets) const
 {
   bool within = true;
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    const double lo = config_.joints[i].position_min;
-    const double hi = config_.joints[i].position_max;
+  for (const auto & joint : config_.joints) {
+    const size_t i = joint.joint_index;
+    const double lo = joint.position_min;
+    const double hi = joint.position_max;
     if (hi > lo) {  // only clamp when limits are configured
       if (targets[i] < lo) {
         targets[i] = lo;
@@ -334,37 +343,41 @@ void MiraculousArm::read_loop()
   const std::chrono::microseconds period(period_us);
   auto next_wake = clock::now();
 
-  std::array<float, kArmJoints> motor_pos_rad{};
+  std::array<float, kArmJoints> joint_pos_rad{};
   std::array<float, kArmJoints> joint_vel_rad_s{};
   std::array<Cia402State_t, kArmJoints> states{};
 
   while (read_thread_running_) {
     next_wake += period;
 
-    for (size_t i = 0; i < kArmJoints; ++i) {
-      if (!motors_[i]) {
+    for (const auto & joint : config_.joints) {
+      const size_t i = joint.joint_index;
+      auto * motor = motors_[i];
+      if (!motor) {
         continue;
       }
       float p_rad = 0.0f;
       float v_rad_s = 0.0f;
       Cia402State_t s = CIA_STATE_NOT_READY_TO_SWITCH_ON;
-      miraculous_motor_get_position_ex(motors_[i], &p_rad, POS_UNIT_RADIAN);
-      miraculous_motor_get_velocity_ex(motors_[i], &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
-      miraculous_motor_get_state(motors_[i], &s);
-      motor_pos_rad[i] = p_rad;
+      miraculous_motor_get_position_ex(motor, &p_rad, POS_UNIT_RADIAN);
+      miraculous_motor_get_velocity_ex(motor, &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
+      miraculous_motor_get_state(motor, &s);
+      joint_pos_rad[i] = p_rad;
       joint_vel_rad_s[i] = v_rad_s;
       states[i] = s;
     }
     // Poll the shared CAN context to dispatch receive/EMCY callbacks.
-    if (motors_[0]) {
-      miraculous_motor_poll(motors_[0], 0);
+    for (auto * motor : motors_) {
+      if (motor) {
+        miraculous_motor_poll(motor, 0);
+        break;
+      }
     }
 
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       for (size_t i = 0; i < kArmJoints; ++i) {
-        cached_pos_rad_[i] =
-          static_cast<double>(motor_pos_rad[i]) / config_.joints[i].reduction_ratio;
+        cached_pos_rad_[i] = static_cast<double>(joint_pos_rad[i]);
         cached_vel_rad_[i] = static_cast<double>(joint_vel_rad_s[i]);
         cached_states_[i] = states[i];
         if (states[i] == CIA_STATE_FAULT ||

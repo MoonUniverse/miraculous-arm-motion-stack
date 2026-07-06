@@ -14,6 +14,7 @@
  */
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -53,6 +54,30 @@ std::vector<int> parse_int_list(const std::string & s, const std::vector<int> & 
   return out.empty() ? def : out;
 }
 
+std::vector<int> default_joint_indices(size_t size)
+{
+  std::vector<int> out;
+  out.reserve(size);
+  for (size_t i = 0; i < size; ++i) {
+    out.push_back(static_cast<int>(i));
+  }
+  return out;
+}
+
+bool validate_joint_indices(const std::vector<int> & indices)
+{
+  std::array<bool, kArmJoints> seen{};
+  for (const int index : indices) {
+    if (index < 0 || static_cast<size_t>(index) >= kArmJoints ||
+      seen[static_cast<size_t>(index)])
+    {
+      return false;
+    }
+    seen[static_cast<size_t>(index)] = true;
+  }
+  return true;
+}
+
 /// Parse a comma-separated double list.  If a single value is given, broadcast
 /// it to all kArmJoints entries.
 std::vector<double> parse_double_list(const std::string & s, double single_def)
@@ -75,9 +100,21 @@ std::vector<double> parse_double_list(const std::string & s, double single_def)
   return out;
 }
 
-bool require_size(const std::vector<double> & values)
+bool valid_limit_size(const std::vector<double> & values, size_t active_count)
 {
-  return values.size() == kArmJoints;
+  return values.size() == 1 || values.size() == active_count || values.size() == kArmJoints;
+}
+
+double limit_value_for_joint(
+  const std::vector<double> & values, size_t active_i, size_t joint_index)
+{
+  if (values.size() == 1) {
+    return values.front();
+  }
+  if (values.size() == kArmJoints) {
+    return values[joint_index];
+  }
+  return values[active_i];
 }
 
 /// Generate a timestamped default filename.
@@ -112,8 +149,8 @@ public:
     baudrate_ = declare_parameter<int>("baudrate", 1000);
     const std::string node_ids_str =
       declare_parameter<std::string>("node_ids", "1,2,3,4,5,6");
-    const std::string reduction_ratio_str =
-      declare_parameter<std::string>("reduction_ratio", "100.0");
+    const std::string joint_indices_str =
+      declare_parameter<std::string>("joint_indices", "");
     const std::string position_min_str =
       declare_parameter<std::string>("position_min", "0.0,0.0,0.0,0.0,0.0,0.0");
     const std::string position_max_str =
@@ -140,19 +177,34 @@ public:
     }
 
     auto node_ids = parse_int_list(node_ids_str, {1, 2, 3, 4, 5, 6});
-    auto reduction_ratio = parse_double_list(reduction_ratio_str, 100.0);
+    auto joint_indices = parse_int_list(joint_indices_str, default_joint_indices(node_ids.size()));
     auto position_min = parse_double_list(position_min_str, 0.0);
     auto position_max = parse_double_list(position_max_str, 0.0);
 
-    if (node_ids.size() != kArmJoints || reduction_ratio.size() != kArmJoints) {
+    if (node_ids.empty() || node_ids.size() > kArmJoints) {
       RCLCPP_FATAL(get_logger(),
-        "node_ids/reduction_ratio must list %zu values", kArmJoints);
+        "node_ids must list 1..%zu values", kArmJoints);
       throw std::runtime_error("bad params");
     }
-    if (!require_size(position_min) || !require_size(position_max)) {
+    if (joint_indices.size() != node_ids.size() || !validate_joint_indices(joint_indices)) {
       RCLCPP_FATAL(get_logger(),
-        "position_min and position_max must each contain either 1 or %zu values.",
-        kArmJoints);
+        "joint_indices must list %zu unique values in range 0..%zu",
+        node_ids.size(), kArmJoints - 1);
+      throw std::runtime_error("bad joint_indices");
+    }
+    if (std::find(joint_indices.begin(), joint_indices.end(), static_cast<int>(test_joint_)) ==
+      joint_indices.end())
+    {
+      RCLCPP_FATAL(get_logger(),
+        "test_joint=%zu is not listed in joint_indices.", test_joint_);
+      throw std::runtime_error("inactive test_joint");
+    }
+    if (!valid_limit_size(position_min, node_ids.size()) ||
+      !valid_limit_size(position_max, node_ids.size()))
+    {
+      RCLCPP_FATAL(get_logger(),
+        "position_min and position_max must each contain 1, %zu, or %zu values.",
+        node_ids.size(), kArmJoints);
       throw std::runtime_error("bad position limits");
     }
 
@@ -162,13 +214,14 @@ public:
     config.baudrate = static_cast<CiaBaudrate_t>(baudrate_);
     config.sync_period_us = 0;
     config.read_rate_hz = std::max(frequency_, 100.0);
-    for (size_t i = 0; i < kArmJoints; ++i) {
+    for (size_t i = 0; i < node_ids.size(); ++i) {
+      const size_t joint_index = static_cast<size_t>(joint_indices[i]);
       JointConfig jc;
-      jc.name = std::string("J") + std::to_string(i + 1);
+      jc.name = std::string("J") + std::to_string(joint_index + 1);
+      jc.joint_index = joint_index;
       jc.node_id = static_cast<uint8_t>(node_ids[i]);
-      jc.reduction_ratio = reduction_ratio[i];
-      jc.position_min = position_min[i];
-      jc.position_max = position_max[i];
+      jc.position_min = limit_value_for_joint(position_min, i, joint_index);
+      jc.position_max = limit_value_for_joint(position_max, i, joint_index);
       config.joints.push_back(jc);
     }
 

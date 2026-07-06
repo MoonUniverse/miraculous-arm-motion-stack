@@ -10,7 +10,8 @@
 - Kept the current SDK snapshot as the default x86-64 driver dependency:
   - `miraculous_sdk_x86_64_linux_gnu_20260702/`
 - `miraculous_driver` now defaults to the 2026-07-02 SDK snapshot and requires `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk` for any non-default SDK or target architecture.
-- Current ROS-facing calibration parameter is `reduction_ratio`; old `pulses_per_radian` and placeholder-calibration paths have been removed from the driver stack.
+- Latest SDK `_ex` position APIs are treated as joint/load-side radians; the ROS driver no longer exposes `reduction_ratio`.
+- `node_ids` can now list only the mounted motors, and `joint_indices` maps those motors into ROS slots `0=J1 ... 5=J6` for partial-arm bring-up.
 
 ## 2026-06-30
 
@@ -22,13 +23,12 @@
   - `can_interface`
   - `baudrate`
   - `node_ids`
-  - `reduction_ratio`
   - `position_min`
   - `position_max`
   - `sync_period_us`
   - `read_rate_hz`
 - Hardened real motion paths:
-  - `MiraculousSystem`, `trajectory_tracking_test_node`, and `playback_node` validate `reduction_ratio` before opening motors.
+  - `MiraculousSystem`, `trajectory_tracking_test_node`, and `playback_node` validate `position_min` / `position_max` before motion.
   - Motion-capable paths now pass `position_min` / `position_max` into `JointConfig` so `MiraculousArm::check_limits()` can clamp commanded targets.
   - `trajectory_tracking_test_node` defaults are now conservative for first bring-up: `amplitude:=0.03`, `period:=6.0`, `duration:=3.0`.
 - Updated real hardware launch files to pass the same parameter set to `robot_state_publisher` and `ros2_control_node`.
@@ -61,7 +61,7 @@
   - Services: `/playback/play`, `/playback/stop`.
   - Supports `speed_scale` and `loop` parameters.
 - Launch files: `real_control.launch.py`, `moveit_real.launch.py`, `teach.launch.py`, `playback.launch.py`.
-- Config files: `real_ros2_controllers.yaml`, `miraculous_arm_params.yaml` (`reduction_ratio` and software-limit placeholders for user to fill).
+- Config files: `real_ros2_controllers.yaml`, `miraculous_arm_params.yaml` (software-limit placeholders for user to fill).
 - CMakeLists defaults to the current 2026-07-02 x86-64 SDK snapshot: `miraculous_sdk_x86_64_linux_gnu_20260702`. Other SDK builds must be supplied explicitly with `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk`.
 - Build verified:
 
@@ -73,7 +73,7 @@ colcon build --symlink-install --packages-select miraculous_driver --cmake-args 
 ```
 
 - Plugin discovery confirmed; executables registered as `miraculous_driver teach_record_node` and `miraculous_driver playback_node`.
-- Next steps: fill in real `reduction_ratio` and software-limit values in `miraculous_arm_params.yaml`; test on real CAN bus.
+- Next steps: fill in real software-limit values in `miraculous_arm_params.yaml`; test on real CAN bus.
 
 ## 2026-06-16
 

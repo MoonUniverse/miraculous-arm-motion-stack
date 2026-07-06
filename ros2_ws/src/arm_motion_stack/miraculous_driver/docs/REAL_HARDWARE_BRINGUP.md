@@ -20,14 +20,27 @@ source install/setup.bash
 Set these before any motion test:
 
 ```bash
-export ARM_REDUCTION_RATIO="REAL_J1,REAL_J2,REAL_J3,REAL_J4,REAL_J5,REAL_J6"
 export ARM_LIMIT_MIN="MIN_J1,MIN_J2,MIN_J3,MIN_J4,MIN_J5,MIN_J6"
 export ARM_LIMIT_MAX="MAX_J1,MAX_J2,MAX_J3,MAX_J4,MAX_J5,MAX_J6"
 ```
 
-- `ARM_REDUCTION_RATIO`: motor revolutions per joint/load revolution for each joint. ROS commands/states stay joint-side radians; the SDK position APIs use motor-side radians.
+- SDK `_ex` position APIs already use joint/load-side radians, so the ROS driver does not configure or apply a reduction ratio.
 - `ARM_LIMIT_MIN` / `ARM_LIMIT_MAX`: conservative software limits in radians.
 - `0.0,0.0` for a joint disables clamping and should only be used for passive readout.
+- `node_ids` and `joint_indices` must have the same length. `joint_indices` uses ROS slots `0=J1 ... 5=J6`.
+
+Examples:
+
+```bash
+# Only J1 mounted: CAN node 1 drives ROS J1.
+node_ids:=1 joint_indices:=0
+
+# J1-J3 mounted.
+node_ids:=1,2,3 joint_indices:=0,1,2
+
+# Only J3 mounted: CAN node 3 drives ROS J3.
+node_ids:=3 joint_indices:=2 test_joint:=2
+```
 
 ## 3. Bring Up CAN
 
@@ -48,7 +61,8 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver teach.launch.py \
   can_interface:=can0 \
-  reduction_ratio:="$ARM_REDUCTION_RATIO" \
+  node_ids:=1,2,3,4,5,6 \
+  joint_indices:=0,1,2,3,4,5 \
   auto_record:=false
 ```
 
@@ -84,7 +98,8 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
   can_interface:=can0 \
-  reduction_ratio:="$ARM_REDUCTION_RATIO" \
+  node_ids:=1 \
+  joint_indices:=0 \
   position_min:="$ARM_LIMIT_MIN" \
   position_max:="$ARM_LIMIT_MAX" \
   test_joint:=0 \

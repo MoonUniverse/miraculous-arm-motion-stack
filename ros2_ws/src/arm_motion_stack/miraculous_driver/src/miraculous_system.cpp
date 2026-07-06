@@ -24,6 +24,46 @@ bool expand_single_value(std::vector<double> & values, size_t size)
   }
   return values.size() == size;
 }
+
+std::vector<int> default_joint_indices(size_t size)
+{
+  std::vector<int> out;
+  out.reserve(size);
+  for (size_t i = 0; i < size; ++i) {
+    out.push_back(static_cast<int>(i));
+  }
+  return out;
+}
+
+bool validate_joint_indices(const std::vector<int> & indices, size_t max_size)
+{
+  std::vector<bool> seen(max_size, false);
+  for (const int index : indices) {
+    if (index < 0 || static_cast<size_t>(index) >= max_size || seen[static_cast<size_t>(index)]) {
+      return false;
+    }
+    seen[static_cast<size_t>(index)] = true;
+  }
+  return true;
+}
+
+bool validate_limit_values(
+  const std::vector<double> & values, size_t active_count, size_t all_count)
+{
+  return values.size() == 1 || values.size() == active_count || values.size() == all_count;
+}
+
+double limit_value_for_joint(
+  const std::vector<double> & values, size_t active_i, size_t joint_index)
+{
+  if (values.size() == 1) {
+    return values.front();
+  }
+  if (values.size() == kArmJoints) {
+    return values[joint_index];
+  }
+  return values[active_i];
+}
 }
 
 hardware_interface::CallbackReturn MiraculousSystem::on_init(
@@ -103,53 +143,46 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
   const std::vector<int> default_node_ids = {1, 2, 3, 4, 5, 6};
   const std::vector<int> node_ids =
     parse_int_list_param("node_ids", default_node_ids);
-
-  std::vector<double> reduction_ratio =
-    parse_double_list_param("reduction_ratio", {100.0});
-  if (!expand_single_value(reduction_ratio, joint_names_.size())) {
-    RCLCPP_FATAL(
-      rclcpp::get_logger("MiraculousSystem"),
-      "reduction_ratio must contain either 1 or %zu comma-separated values.",
-      joint_names_.size());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
+  const std::vector<int> joint_indices = parse_int_list_param(
+    "joint_indices", default_joint_indices(node_ids.size()));
 
   std::vector<double> position_min =
     parse_double_list_param("position_min", std::vector<double>(joint_names_.size(), 0.0));
   std::vector<double> position_max =
     parse_double_list_param("position_max", std::vector<double>(joint_names_.size(), 0.0));
-  if (!expand_single_value(position_min, joint_names_.size()) ||
-    !expand_single_value(position_max, joint_names_.size()))
+
+  if (node_ids.empty() || node_ids.size() > joint_names_.size()) {
+    RCLCPP_FATAL(
+      rclcpp::get_logger("MiraculousSystem"),
+      "node_ids must contain 1..%zu values.", joint_names_.size());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  if (joint_indices.size() != node_ids.size() ||
+    !validate_joint_indices(joint_indices, joint_names_.size()))
   {
     RCLCPP_FATAL(
       rclcpp::get_logger("MiraculousSystem"),
-      "position_min and position_max must each contain either 1 or %zu comma-separated values.",
-      joint_names_.size());
+      "joint_indices must contain %zu unique values in range 0..%zu.",
+      node_ids.size(), joint_names_.size() - 1);
     return hardware_interface::CallbackReturn::ERROR;
   }
-
-  if (node_ids.size() != joint_names_.size()) {
+  if (!validate_limit_values(position_min, node_ids.size(), joint_names_.size()) ||
+    !validate_limit_values(position_max, node_ids.size(), joint_names_.size()))
+  {
     RCLCPP_FATAL(
       rclcpp::get_logger("MiraculousSystem"),
-      "node_ids count (%zu) does not match joint count (%zu).",
+      "position_min and position_max must each contain 1, %zu, or %zu comma-separated values.",
       node_ids.size(), joint_names_.size());
     return hardware_interface::CallbackReturn::ERROR;
   }
-  for (size_t i = 0; i < joint_names_.size(); ++i) {
+  for (size_t i = 0; i < node_ids.size(); ++i) {
+    const size_t joint_index = static_cast<size_t>(joint_indices[i]);
     JointConfig jc;
-    jc.name = joint_names_[i];
+    jc.name = joint_names_[joint_index];
+    jc.joint_index = joint_index;
     jc.node_id = static_cast<uint8_t>(node_ids[i]);
-    jc.reduction_ratio = reduction_ratio[i];
-    jc.position_min = position_min[i];
-    jc.position_max = position_max[i];
-    if (jc.reduction_ratio <= 0.0) {
-      RCLCPP_FATAL(
-        rclcpp::get_logger("MiraculousSystem"),
-        "Joint '%s' has invalid reduction_ratio=%g. Set the 'reduction_ratio' "
-        "hardware parameter (single value or comma-separated list of %zu).",
-        jc.name.c_str(), jc.reduction_ratio, joint_names_.size());
-      return hardware_interface::CallbackReturn::ERROR;
-    }
+    jc.position_min = limit_value_for_joint(position_min, i, joint_index);
+    jc.position_max = limit_value_for_joint(position_max, i, joint_index);
     config.joints.push_back(jc);
   }
 
@@ -191,10 +224,9 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
 
   RCLCPP_INFO(
     rclcpp::get_logger("MiraculousSystem"),
-    "Configured: can=%s joints=%zu sync_period_us=%u read_rate_hz=%.1f reduction_ratio[0]=%.3f",
-    config.can_interface.c_str(), joint_names_.size(),
-    config.sync_period_us, config.read_rate_hz,
-    config.joints.empty() ? 0.0 : config.joints.front().reduction_ratio);
+    "Configured: can=%s active_joints=%zu total_joints=%zu sync_period_us=%u read_rate_hz=%.1f",
+    config.can_interface.c_str(), config.joints.size(), joint_names_.size(),
+    config.sync_period_us, config.read_rate_hz);
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }

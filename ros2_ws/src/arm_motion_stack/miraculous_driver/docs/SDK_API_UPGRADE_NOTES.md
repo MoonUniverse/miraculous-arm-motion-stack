@@ -5,7 +5,6 @@
 7 月 2 日 x86-64 SDK 新增并导出：
 
 - `miraculous_motor_sync_send/start/stop()`：官方 SYNC 管理 API。
-- `miraculous_motor_set_reduction_ratio()`：设置减速比。
 - `miraculous_motor_get_velocity_ex(..., VEL_SIDE_LOAD, VEL_UNIT_RAD_S)`：直接读取负载侧 rad/s。
 - `miraculous_sdk_version()` / `miraculous_sdk_build_time()`：版本信息。
 
@@ -13,7 +12,7 @@ ROS 2 适配状态：
 
 - `MiraculousArm` 已移除 `set_targets_pulse()`、`get_positions_pulse()`、`rad_to_pulse()`、`pulse_to_rad()` 兼容路径。
 - ROS/MoveIt 外部接口仍使用关节侧 rad。
-- SDK position `_ex` API 使用电机侧 rad，因此代码通过 `reduction_ratio` 做 `joint_rad <-> motor_rad` 换算。
+- SDK position `_ex` API 已确认为关节输出侧 rad，ROS driver 不再配置或应用减速比。
 - 速度状态改用 SDK 的负载侧 rad/s，不再把 `get_velocity()` 当 pulse/s 手工换算。
 
 ## 概述

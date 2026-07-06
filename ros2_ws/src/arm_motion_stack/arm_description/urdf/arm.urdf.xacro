@@ -4,7 +4,7 @@
   <xacro:arg name="can_interface" default="can0"/>
   <xacro:arg name="baudrate" default="1000"/>
   <xacro:arg name="node_ids" default="1,2,3,4,5,6"/>
-  <xacro:arg name="reduction_ratio" default="100.0,100.0,100.0,100.0,100.0,100.0"/>
+  <xacro:arg name="joint_indices" default="0,1,2,3,4,5"/>
   <xacro:arg name="position_min" default="0.0,0.0,0.0,0.0,0.0,0.0"/>
   <xacro:arg name="position_max" default="0.0,0.0,0.0,0.0,0.0,0.0"/>
   <xacro:arg name="sync_period_us" default="0"/>
@@ -29,7 +29,7 @@
     can_interface="$(arg can_interface)"
     baudrate="$(arg baudrate)"
     node_ids="$(arg node_ids)"
-    reduction_ratio="$(arg reduction_ratio)"
+    joint_indices="$(arg joint_indices)"
     position_min="$(arg position_min)"
     position_max="$(arg position_max)"
     sync_period_us="$(arg sync_period_us)"

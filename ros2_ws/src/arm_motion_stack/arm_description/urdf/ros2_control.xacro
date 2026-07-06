@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
-  <xacro:macro name="arm_ros2_control" params="name hardware_type can_interface baudrate node_ids reduction_ratio position_min position_max sync_period_us read_rate_hz">
+  <xacro:macro name="arm_ros2_control" params="name hardware_type can_interface baudrate node_ids joint_indices position_min position_max sync_period_us read_rate_hz">
     <ros2_control name="${name}" type="system">
       <hardware>
         <xacro:if value="${hardware_type == 'fake'}">
@@ -23,7 +23,7 @@
           <param name="can_interface">${can_interface}</param>
           <param name="baudrate">${baudrate}</param>
           <param name="node_ids">${node_ids}</param>
-          <param name="reduction_ratio">${reduction_ratio}</param>
+          <param name="joint_indices">${joint_indices}</param>
           <param name="position_min">${position_min}</param>
           <param name="position_max">${position_max}</param>
           <param name="sync_period_us">${sync_period_us}</param>

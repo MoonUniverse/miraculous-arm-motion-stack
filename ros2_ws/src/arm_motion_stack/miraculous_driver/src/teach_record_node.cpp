@@ -38,25 +38,31 @@ std::vector<int> parse_int_list(const std::string & s, const std::vector<int> & 
   return out.empty() ? def : out;
 }
 
-std::vector<double> parse_double_list(const std::string & s, double single_def)
+std::vector<int> default_joint_indices(size_t size)
 {
-  std::vector<double> out;
-  if (s.empty()) {
-    out.assign(miraculous_driver::kArmJoints, single_def);
-    return out;
-  }
-  std::stringstream ss(s);
-  std::string tok;
-  while (std::getline(ss, tok, ',')) {
-    try {
-      out.push_back(std::stod(tok));
-    } catch (...) {}
-  }
-  if (out.size() == 1) {
-    out.assign(miraculous_driver::kArmJoints, out[0]);
+  std::vector<int> out;
+  out.reserve(size);
+  for (size_t i = 0; i < size; ++i) {
+    out.push_back(static_cast<int>(i));
   }
   return out;
 }
+
+bool validate_joint_indices(const std::vector<int> & indices)
+{
+  std::array<bool, miraculous_driver::kArmJoints> seen{};
+  for (const int index : indices) {
+    if (index < 0 ||
+      static_cast<size_t>(index) >= miraculous_driver::kArmJoints ||
+      seen[static_cast<size_t>(index)])
+    {
+      return false;
+    }
+    seen[static_cast<size_t>(index)] = true;
+  }
+  return true;
+}
+
 }  // namespace
 
 class TeachRecordNode : public rclcpp::Node
@@ -68,37 +74,38 @@ public:
     baudrate_ = declare_parameter<int>("baudrate", 1000);
     const std::string node_ids_str =
       declare_parameter<std::string>("node_ids", "1,2,3,4,5,6");
-    const std::string reduction_ratio_str =
-      declare_parameter<std::string>("reduction_ratio", "100.0");
+    const std::string joint_indices_str =
+      declare_parameter<std::string>("joint_indices", "");
     joint_states_topic_ = declare_parameter<std::string>("joint_states_topic", "/arm_joint_states");
     record_rate_ = declare_parameter<double>("record_rate", 50.0);
     output_file_ = declare_parameter<std::string>("output_file", "");
     auto_record_ = declare_parameter<bool>("auto_record", false);
 
     auto node_ids = parse_int_list(node_ids_str, {1, 2, 3, 4, 5, 6});
-    auto reduction_ratio = parse_double_list(reduction_ratio_str, 100.0);
+    auto joint_indices = parse_int_list(joint_indices_str, default_joint_indices(node_ids.size()));
 
-    if (node_ids.size() != miraculous_driver::kArmJoints) {
+    if (node_ids.empty() || node_ids.size() > miraculous_driver::kArmJoints) {
       RCLCPP_FATAL(get_logger(),
-        "node_ids must list %zu ids", miraculous_driver::kArmJoints);
+        "node_ids must list 1..%zu ids", miraculous_driver::kArmJoints);
       throw std::runtime_error("bad node_ids");
     }
-    if (reduction_ratio.size() != miraculous_driver::kArmJoints) {
+    if (joint_indices.size() != node_ids.size() || !validate_joint_indices(joint_indices)) {
       RCLCPP_FATAL(get_logger(),
-        "reduction_ratio must list %zu values", miraculous_driver::kArmJoints);
-      throw std::runtime_error("bad reduction_ratio");
+        "joint_indices must list %zu unique values in range 0..%zu",
+        node_ids.size(), miraculous_driver::kArmJoints - 1);
+      throw std::runtime_error("bad joint_indices");
     }
-
     ArmConfig config;
     config.can_interface = can_interface_;
     config.baudrate = static_cast<CiaBaudrate_t>(baudrate_);
     config.sync_period_us = 0;
     config.read_rate_hz = record_rate_;
-    for (size_t i = 0; i < miraculous_driver::kArmJoints; ++i) {
+    for (size_t i = 0; i < node_ids.size(); ++i) {
+      const size_t joint_index = static_cast<size_t>(joint_indices[i]);
       JointConfig jc;
-      jc.name = std::string("J") + std::to_string(i + 1);
+      jc.name = std::string("J") + std::to_string(joint_index + 1);
+      jc.joint_index = joint_index;
       jc.node_id = static_cast<uint8_t>(node_ids[i]);
-      jc.reduction_ratio = reduction_ratio[i];
       config.joints.push_back(jc);
     }
 

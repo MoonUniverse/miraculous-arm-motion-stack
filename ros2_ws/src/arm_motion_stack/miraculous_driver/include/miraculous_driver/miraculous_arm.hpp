@@ -17,14 +17,12 @@ namespace miraculous_driver
 /// Number of joints on the ARM 6DOF manipulator (J1..J6).
 constexpr size_t kArmJoints = 6;
 
-/// Per-joint configuration: CANopen node id and joint<->motor angle conversion.
+/// Per-joint configuration: CANopen node id and joint-side software limits.
 struct JointConfig
 {
   std::string name;            ///< joint name, e.g. "J1"
+  size_t joint_index = 0;       ///< fixed ROS joint slot: 0=J1 .. 5=J6
   uint8_t node_id = 0;         ///< CANopen node id (1..127)
-  /// Motor revolutions per joint/load revolution. ROS uses joint-side radians;
-  /// the SDK _ex position APIs use motor-side radians.
-  double reduction_ratio = 100.0;
   double position_min = 0.0;   ///< joint lower limit [rad]
   double position_max = 0.0;   ///< joint upper limit [rad]
 };
@@ -34,7 +32,7 @@ struct ArmConfig
 {
   std::string can_interface = "can0";        ///< SocketCAN interface name
   CiaBaudrate_t baudrate = CIA_BAUDRATE_1000; ///< CAN baudrate (0 = keep current)
-  std::vector<JointConfig> joints;            ///< must hold kArmJoints entries
+  std::vector<JointConfig> joints;            ///< configured real joints, 1..kArmJoints entries
   /// CSP SYNC period [us]. 0 = manual SYNC (wrapper sends one unified SYNC frame
   /// per write cycle after setting all targets). Non-zero = SDK internal SYNC timer.
   uint32_t sync_period_us = 0;
@@ -50,10 +48,10 @@ using EmcyCallback =
  *        the ARM manipulator.
  *
  * Responsibilities:
- *  - open / bootstrap / enable / disable the 6 motors
- *  - joint-side radian <-> motor-side radian conversion
+ *  - open / bootstrap / enable / disable the configured motors
+ *  - pass joint-side radians directly through the SDK _ex APIs
  *  - background thread polling actual position/velocity/state into a mutex cache
- *  - CSP write of 6 target positions with a unified SYNC broadcast
+ *  - CSP write of configured target positions with a unified SYNC broadcast
  *  - joint limit clamping and EMCY detection
  *
  * Threading: read() callers (ros2_control or teach/playback nodes) only copy the
@@ -70,7 +68,7 @@ public:
 
   // ---- lifecycle -----------------------------------------------------------
 
-  /// Open 6 motors and configure conversion, without enabling. Starts the
+  /// Open 6 motors without enabling. Starts the
   /// background read thread. Returns false on any open failure (opened motors
   /// are closed automatically).
   bool init(const ArmConfig & config);
@@ -87,7 +85,7 @@ public:
 
   // ---- PDS state machine ---------------------------------------------------
 
-  /// Bootstrap + full_enable + set_mode(CSP) + csp_init for all motors.
+  /// Bootstrap + full_enable + set_mode(CSP) + csp_init for configured motors.
   /// After this the arm follows set_targets_rad() each write cycle.
   bool enable_csp();
 
@@ -113,9 +111,9 @@ public:
 
   // ---- CSP writing ---------------------------------------------------------
 
-  /// Set 6 joint-side target positions [rad], convert to motor-side radians,
-  /// write csp_set_target_ex for each motor, then send one unified SYNC frame in
-  /// manual SYNC mode. Targets are clamped to joint-side limits.
+  /// Set joint-side target positions [rad] for configured motors, then send one
+  /// unified SYNC frame in manual SYNC mode. Targets are clamped to joint-side
+  /// limits.
   /// @return true if all writes succeeded.
   bool set_targets_rad(const std::array<double, kArmJoints> & targets);
 

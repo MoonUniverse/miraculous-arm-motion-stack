@@ -110,10 +110,10 @@ for (i = 0..5) {
 |------|------|--------|------|
 | `can_interface` | string | `can0` | SocketCAN 接口名 |
 | `baudrate` | int | `1000` | CAN 波特率 (kbps) |
-| `node_ids` | string | `1,2,3,4,5,6` | 6 个节点 ID |
-| `reduction_ratio` | string | `100.0,...` | 电机侧/关节侧减速比, 可填单值或 6 个逗号分隔值 |
-| `position_min` | string | `0.0,...` | 6 轴软件下限 [rad], `max <= min` 时该轴不 clamp |
-| `position_max` | string | `0.0,...` | 6 轴软件上限 [rad], `max <= min` 时该轴不 clamp |
+| `node_ids` | string | `1,2,3,4,5,6` | 已安装电机的 CANopen 节点 ID |
+| `joint_indices` | string | `0,1,2,3,4,5` | 每个 `node_id` 对应的 ROS 关节槽位, `0=J1 ... 5=J6` |
+| `position_min` | string | `0.0,...` | 软件下限 [rad], 可填 1 个、已装关节数量 N 个、或 6 个全量值 |
+| `position_max` | string | `0.0,...` | 软件上限 [rad], 可填 1 个、已装关节数量 N 个、或 6 个全量值 |
 
 ### 4.2 轨迹参数
 
@@ -153,7 +153,6 @@ colcon build --symlink-install --packages-select miraculous_driver \
 ```bash
 source install/setup.bash
 
-export ARM_REDUCTION_RATIO="REAL_J1,REAL_J2,REAL_J3,REAL_J4,REAL_J5,REAL_J6"
 export ARM_LIMIT_MIN="MIN_J1,MIN_J2,MIN_J3,MIN_J4,MIN_J5,MIN_J6"
 export ARM_LIMIT_MAX="MAX_J1,MAX_J2,MAX_J3,MAX_J4,MAX_J5,MAX_J6"
 
@@ -161,7 +160,8 @@ export ARM_LIMIT_MAX="MAX_J1,MAX_J2,MAX_J3,MAX_J4,MAX_J5,MAX_J6"
 ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
   can_interface:=can0 \
   baudrate:=1000 \
-  reduction_ratio:="$ARM_REDUCTION_RATIO" \
+  node_ids:=1 \
+  joint_indices:=0 \
   position_min:="$ARM_LIMIT_MIN" \
   position_max:="$ARM_LIMIT_MAX" \
   test_joint:=0 \
@@ -173,7 +173,8 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py
 ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
   can_interface:=can0 \
   baudrate:=1000 \
-  reduction_ratio:="$ARM_REDUCTION_RATIO" \
+  node_ids:=1,2,3 \
+  joint_indices:=0,1,2 \
   position_min:="$ARM_LIMIT_MIN" \
   position_max:="$ARM_LIMIT_MAX" \
   test_joint:=2 \
@@ -279,7 +280,8 @@ conda install numpy matplotlib
 ```bash
 # J1 正弦, 0.03rad幅值, 3s自动停止
 ros2 launch miraculous_driver trajectory_test.launch.py \
-  reduction_ratio:="$ARM_REDUCTION_RATIO" position_min:="$ARM_LIMIT_MIN" position_max:="$ARM_LIMIT_MAX" \
+  node_ids:=1 joint_indices:=0 \
+  position_min:="$ARM_LIMIT_MIN" position_max:="$ARM_LIMIT_MAX" \
   test_joint:=0 amplitude:=0.03 period:=6.0 waveform:=sin duration:=3.0
 ```
 
@@ -376,14 +378,13 @@ colcon build --symlink-install --packages-select miraculous_driver \
   --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
 
 # === 参数 ===
-export ARM_REDUCTION_RATIO="REAL_J1,REAL_J2,REAL_J3,REAL_J4,REAL_J5,REAL_J6"
 export ARM_LIMIT_MIN="MIN_J1,MIN_J2,MIN_J3,MIN_J4,MIN_J5,MIN_J6"
 export ARM_LIMIT_MAX="MAX_J1,MAX_J2,MAX_J3,MAX_J4,MAX_J5,MAX_J6"
 
 # === 启动 J1 小幅跟随测试 ===
 ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
   can_interface:=can0 baudrate:=1000 \
-  reduction_ratio:="$ARM_REDUCTION_RATIO" \
+  node_ids:=1 joint_indices:=0 \
   position_min:="$ARM_LIMIT_MIN" position_max:="$ARM_LIMIT_MAX" \
   test_joint:=0 amplitude:=0.03 period:=6.0 duration:=3.0
 
@@ -398,6 +399,5 @@ python3 $(ros2 pkg prefix miraculous_driver)/lib/miraculous_driver/plot_trajecto
   ~/tracking_test_*.csv
 
 # === 自动 5s 测试 ===
-ros2 launch miraculous_driver trajectory_test.launch.py duration:=3.0 \
-  reduction_ratio:="YOUR_VALUES"
+ros2 launch miraculous_driver trajectory_test.launch.py duration:=3.0
 ```

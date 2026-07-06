@@ -13,7 +13,7 @@ def generate_launch_description():
     can_interface = LaunchConfiguration("can_interface")
     baudrate = LaunchConfiguration("baudrate")
     node_ids = LaunchConfiguration("node_ids")
-    reduction_ratio = LaunchConfiguration("reduction_ratio")
+    joint_indices = LaunchConfiguration("joint_indices")
     record_rate = LaunchConfiguration("record_rate")
     auto_record = LaunchConfiguration("auto_record")
 
@@ -36,7 +36,7 @@ def generate_launch_description():
             "can_interface": can_interface,
             "baudrate": baudrate,
             "node_ids": node_ids,
-            "reduction_ratio": reduction_ratio,
+            "joint_indices": joint_indices,
             "joint_states_topic": joint_states_topic,
             "record_rate": record_rate,
             "auto_record": auto_record,
@@ -48,10 +48,8 @@ def generate_launch_description():
         DeclareLaunchArgument("can_interface", default_value="can0"),
         DeclareLaunchArgument("baudrate", default_value="1000"),
         DeclareLaunchArgument("node_ids", default_value="1,2,3,4,5,6"),
-        DeclareLaunchArgument(
-            "reduction_ratio",
-            default_value="100.0,100.0,100.0,100.0,100.0,100.0",
-            description="TODO: replace with real per-joint reduction_ratio"),
+        DeclareLaunchArgument("joint_indices", default_value="0,1,2,3,4,5",
+                              description="ROS joint indices for node_ids: 0=J1..5=J6"),
         DeclareLaunchArgument("record_rate", default_value="50.0"),
         DeclareLaunchArgument("auto_record", default_value="false"),
         Node(

@@ -3,15 +3,16 @@
 # This file documents all parameters consumed by the trajectory_tracking_test_node.
 # Values can be overridden via launch arguments or command-line parameters.
 #
-# ROS commands/states are joint-side radians. The SDK position APIs use
-# motor-side radians, so reduction_ratio converts joint <-> motor angle.
+# ROS commands/states and SDK _ex position APIs all use joint/load-side radians.
 trajectory_test:
   ros__parameters:
     # ---- motor / CAN ----
     can_interface: "can0"
     baudrate: 1000
     node_ids: "1,2,3,4,5,6"
-    reduction_ratio: "100.0,100.0,100.0,100.0,100.0,100.0"
+    # ROS joint slot for each node_id: 0=J1, 1=J2, ..., 5=J6.
+    joint_indices: "0,1,2,3,4,5"
+    # Values may be 1 value, one per configured node, or 6 full J1..J6 values.
     # 0/0 disables clamping for that joint. Replace with measured safe limits before motion tests.
     position_min: "0.0,0.0,0.0,0.0,0.0,0.0"
     position_max: "0.0,0.0,0.0,0.0,0.0,0.0"
