@@ -62,6 +62,11 @@ std::vector<double> parse_double_list(const std::string & s, double single_def)
   return out;
 }
 
+bool require_size(const std::vector<double> & values)
+{
+  return values.size() == miraculous_driver::kArmJoints;
+}
+
 /// Load a teach CSV (header: timestamp,J1..J6). Returns false on parse failure.
 bool load_csv(const std::string & path, std::vector<TrajectoryPoint> & traj)
 {
@@ -110,24 +115,34 @@ public:
     baudrate_ = declare_parameter<int>("baudrate", 1000);
     const std::string node_ids_str =
       declare_parameter<std::string>("node_ids", "1,2,3,4,5,6");
-    const std::string ppr_str =
-      declare_parameter<std::string>("pulses_per_radian", "");
-    const std::string ppr_single_str =
-      declare_parameter<std::string>("pulses_per_radian_single", "0.0");
+    const std::string reduction_ratio_str =
+      declare_parameter<std::string>("reduction_ratio", "100.0");
+    const std::string position_min_str =
+      declare_parameter<std::string>("position_min", "0.0,0.0,0.0,0.0,0.0,0.0");
+    const std::string position_max_str =
+      declare_parameter<std::string>("position_max", "0.0,0.0,0.0,0.0,0.0,0.0");
     joint_states_topic_ = declare_parameter<std::string>("joint_states_topic", "/arm_joint_states");
     input_file_ = declare_parameter<std::string>("input_file", "");
     speed_scale_ = declare_parameter<double>("speed_scale", 1.0);
     loop_ = declare_parameter<bool>("loop", false);
 
     auto node_ids = parse_int_list(node_ids_str, {1, 2, 3, 4, 5, 6});
-    auto ppr = parse_double_list(ppr_str, std::stod(ppr_single_str));
+    auto reduction_ratio = parse_double_list(reduction_ratio_str, 100.0);
+    auto position_min = parse_double_list(position_min_str, 0.0);
+    auto position_max = parse_double_list(position_max_str, 0.0);
 
     if (node_ids.size() != miraculous_driver::kArmJoints ||
-      ppr.size() != miraculous_driver::kArmJoints)
+      reduction_ratio.size() != miraculous_driver::kArmJoints)
     {
-      RCLCPP_FATAL(get_logger(), "node_ids/pulses_per_radian must list %zu values",
+      RCLCPP_FATAL(get_logger(), "node_ids/reduction_ratio must list %zu values",
         miraculous_driver::kArmJoints);
       throw std::runtime_error("bad params");
+    }
+    if (!require_size(position_min) || !require_size(position_max)) {
+      RCLCPP_FATAL(get_logger(),
+        "position_min and position_max must each contain either 1 or %zu values.",
+        miraculous_driver::kArmJoints);
+      throw std::runtime_error("bad position limits");
     }
 
     ArmConfig config;
@@ -139,7 +154,9 @@ public:
       JointConfig jc;
       jc.name = std::string("J") + std::to_string(i + 1);
       jc.node_id = static_cast<uint8_t>(node_ids[i]);
-      jc.pulses_per_radian = ppr[i];
+      jc.reduction_ratio = reduction_ratio[i];
+      jc.position_min = position_min[i];
+      jc.position_max = position_max[i];
       config.joints.push_back(jc);
     }
 

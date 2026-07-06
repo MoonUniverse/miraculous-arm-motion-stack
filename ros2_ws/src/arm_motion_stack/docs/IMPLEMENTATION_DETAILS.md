@@ -19,7 +19,7 @@
 当前 ROS 2 workspace 主目录：
 
 ```text
-/home/alienware/Desktop/PersonalProject/ros2_ws
+/home/alienware/Documents/PersonalProject/ros2_ws
 ```
 
 核心包：
@@ -452,7 +452,7 @@ joints: J1, J2, J3, J4, J5, J6
 推荐使用系统 Python，避免 Conda 影响 ROS 2 包发现：
 
 ```bash
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
@@ -574,7 +574,7 @@ arm_isaac_sim/config/arm_isaac_drives.yaml
 
 ```bash
 # Terminal 1: ROS UDP bridge
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ROS_LOG_DIR=/tmp/ros-log ros2 run arm_isaac_sim arm_isaac_ros_bridge.py
@@ -584,12 +584,12 @@ cd /home/alienware/Documents/xlerobot/IsaacLab
 source /home/alienware/miniconda3/etc/profile.d/conda.sh
 conda activate env_isaaclab
 env TERM=xterm PYTHONDONTWRITEBYTECODE=1 ./isaaclab.sh -p \
-  /home/alienware/Desktop/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/scripts/arm_isaac_backend.py \
-  --backend_config /home/alienware/Desktop/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/config/arm_isaac_backend.yaml \
+  /home/alienware/Documents/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/scripts/arm_isaac_backend.py \
+  --backend_config /home/alienware/Documents/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/config/arm_isaac_backend.yaml \
   --headless --force_exit
 
 # Terminal 3: MoveIt + ros2_control
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ROS_LOG_DIR=/tmp/ros-log ros2 launch arm_bringup isaac_moveit.launch.py \

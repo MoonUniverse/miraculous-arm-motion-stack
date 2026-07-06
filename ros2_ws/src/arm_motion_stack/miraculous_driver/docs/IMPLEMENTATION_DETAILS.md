@@ -12,6 +12,21 @@
 1. **MoveIt 集成** — 实现 `miraculous_driver/MiraculousSystem` ros2_control 硬件插件, 通过 `hardware_type:=real` 接入现有 `arm_controller` (JointTrajectoryController) + `joint_state_broadcaster` + MoveIt 规划栈。
 2. **示教/回放** — 电机去使能自由拖动示教, 实时记录 6 关节编码器角度到 CSV, 再按记录速率 CSP 回放。
 
+真机第一阶段上机流程见：
+
+```text
+ros2_ws/src/arm_motion_stack/miraculous_driver/docs/REAL_HARDWARE_BRINGUP.md
+```
+
+当前 2026-07-02 SDK 适配：
+
+- CMake 在 x86-64 上优先使用 `miraculous_sdk_x86_64_linux_gnu_20260702`。
+- ROS/MoveIt 侧保持关节侧 rad；SDK `_ex` position API 使用电机侧 rad，因此通过 `reduction_ratio` 做换算。
+- 速度反馈改用 `miraculous_motor_get_velocity_ex(..., VEL_SIDE_LOAD, VEL_UNIT_RAD_S)`。
+- 手动 SYNC 改用 `miraculous_motor_sync_send()`，不再直接发送 raw CAN `0x080`。
+- `position_min` / `position_max` 可传入 6 轴软件限位；某一轴 `max <= min` 时该轴不启用 clamp。
+- 轨迹测试默认保持第一阶段保守值：`amplitude:=0.03`、`period:=6.0`、`duration:=3.0`。
+
 ### 硬件拓扑
 
 - 6 个 MiraMotor 电机挂在单条 CAN 总线 (`can0`)
@@ -24,8 +39,9 @@
 
 | 目录 | 架构 | 用途 |
 |------|------|------|
-| `miraculous_sdk/` | ARM aarch64 | 目标设备 (实机运行) |
-| `miraculous_sdk_x86_64/` | x86-64 | 开发主机 (编译验证) |
+| `miraculous_sdk_x86_64_linux_gnu_20260702/` | x86-64 | 当前使用的 2026-07-02 SDK |
+
+旧 `miraculous_sdk/` 和 `miraculous_sdk_x86_64/` 已从仓库移除。若需要 ARM/aarch64 或其他 SDK snapshot，构建时显式传入 `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk`。
 
 #### SDK API 升级 (2026-06-25)
 
@@ -52,10 +68,11 @@ typedef enum {
 ```
 
 **ROS 2 代码适配:**
-- `MiraculousArm::read_loop()` — 后台线程改用 `get_position_ex(..., POS_UNIT_RADIAN)` 直接读取弧度
-- `MiraculousArm::set_targets_rad()` — CSP 下发改用 `csp_set_target_ex(..., POS_UNIT_RADIAN)` 直接发送弧度
-- `rad_to_pulse()` / `pulse_to_rad()` — 保留用于向后兼容 (`set_targets_pulse()`)，但标记为已弃用
-- **优势**: SDK 内部使用 `2^bw` 精确计算，消除手动转换误差，代码更简洁
+- `MiraculousArm::read_loop()` — 后台线程改用 `get_position_ex(..., POS_UNIT_RADIAN)` 读取电机侧弧度，再除以 `reduction_ratio` 得到关节侧弧度
+- `MiraculousArm::set_targets_rad()` — CSP 下发前将关节侧弧度乘以 `reduction_ratio`，再用 `csp_set_target_ex(..., POS_UNIT_RADIAN)` 发送电机侧弧度
+- `MiraculousArm::read_loop()` — 速度改用 `get_velocity_ex(..., VEL_SIDE_LOAD, VEL_UNIT_RAD_S)` 读取负载侧 rad/s
+- 旧 pulse 位置兼容接口已移除；底层脉冲调试应直接使用 SDK example
+- **优势**: SDK 内部使用 `2^bw` 精确计算，消除手动 pulse 转换误差，代码更简洁
 
 ---
 
@@ -77,7 +94,7 @@ ros2_ws/src/arm_motion_stack/miraculous_driver/
 │   ├── teach_record_node.cpp               # 示教记录节点 (260 行)
 │   └── playback_node.cpp                   # 回放节点 (301 行)
 ├── config/
-│   ├── miraculous_arm_params.yaml          # 电机参数 (pulses_per_radian 占位)
+│   ├── miraculous_arm_params.yaml          # 电机参数 (reduction_ratio 占位)
 │   └── real_ros2_controllers.yaml          # 真实硬件 controller_manager 配置
 └── launch/
     ├── real_control.launch.py              # 真实硬件 ros2_control 启动
@@ -104,8 +121,8 @@ MiraculousSystem (ros2_control SystemInterface)
     │  position_commands_[6]
     ▼
 MiraculousArm (C++ wrapper)
-    │  set_targets_rad() → csp_set_target_ex(..., POS_UNIT_RADIAN) × 6 (SDK _ex API)
-    │  can_send(0x080, null, 0)  ← 统一 SYNC
+    │  set_targets_rad() → joint_rad × reduction_ratio → csp_set_target_ex(..., POS_UNIT_RADIAN) × 6
+    │  miraculous_motor_sync_send(motor[0])  ← 手动统一 SYNC
     ▼
 CAN 总线 → 6 个电机
 ```
@@ -115,11 +132,12 @@ CAN 总线 → 6 个电机
 ```
 MiraculousArm::read_loop() [独立线程, 100Hz]
     │  循环:
-    │    1. get_position_ex(motor[i], &pos_rad, POS_UNIT_RADIAN) × 6  → rad (SDK _ex API)
-    │    2. get_velocity(motor[i]) × 6  → pulse/s
+    │    1. get_position_ex(..., POS_UNIT_RADIAN) × 6  → motor-side rad
+    │    2. joint_pos = motor_pos / reduction_ratio
+    │    3. get_velocity_ex(..., VEL_SIDE_LOAD, VEL_UNIT_RAD_S) × 6
     │    3. get_state(motor[i])   × 6  → Cia402State_t
     │    4. motor_poll(motor[0], 0)    → 处理 CAN 事件/EMCY 回调
-    │    5. mutex lock → 缓存更新 (rad + pulse)
+    │    5. mutex lock → 缓存更新 (joint-side rad + load-side rad/s)
     │    6. sleep_until(next_period)
     ▼
 read() 调用方 (ros2_control / teach / playback)
@@ -130,28 +148,25 @@ read() 调用方 (ros2_control / teach / playback)
 
 ```cpp
 // enable_csp() 中:
-miraculous_motor_csp_init(motor[i], sync_period_us, true);  // manual=true
+const bool manual_sync = (sync_period_us == 0);
+miraculous_motor_csp_init(motor[i], sync_period_us, manual_sync);
 
-// set_targets_pulse() 中:
-for (i = 0..5) miraculous_motor_csp_set_target(motor[i], targets[i]);
-miraculous_can_send(can_ctx_, 0x080, nullptr, 0);  // 统一 SYNC
+// set_targets_rad() 中, manual SYNC 模式:
+for (i = 0..5) miraculous_motor_csp_set_target_ex(motor[i], motor_target_rad, POS_UNIT_RADIAN);
+miraculous_motor_sync_send(motor[0]);  // 统一 SYNC
 ```
 
-- `manual=true` 确保 SDK 不在每次 `csp_set_target` 后自动发 SYNC
-- wrapper 在 6 个目标全部写入后发一个 SYNC, 保证 6 轴在同一 SYNC 边沿同步应用目标
-- SYNC 帧: CAN ID = 0x080, DLC = 0
+- `sync_period_us == 0` 时使用手动 SYNC，wrapper 在 6 个目标全部写入后调用 SDK 的 `miraculous_motor_sync_send()`
+- `sync_period_us != 0` 时交给 SDK 定时 SYNC 管理，`disable()` 时调用 `miraculous_motor_sync_stop()`
 
-### 3.4 单位转换
+### 3.4 关节/电机角度转换
 
 ```
-rad = pulse / pulses_per_radian
-pulse = round(rad × pulses_per_radian)
-
-其中:
-pulses_per_radian = counts_per_rev × gear_ratio / (2π)
+motor_rad = joint_rad × reduction_ratio
+joint_rad = motor_rad / reduction_ratio
 ```
 
-每个关节可配置独立的 `pulses_per_radian` 值。
+每个关节可配置独立的 `reduction_ratio` 值。SDK 负责 motor_rad 与编码器计数之间的转换。
 
 ### 3.5 生命周期
 
@@ -211,7 +226,7 @@ constexpr size_t kArmJoints = 6;
 struct JointConfig {
     std::string name;
     uint8_t node_id;
-    double pulses_per_radian;
+    double reduction_ratio;
     double position_min;
     double position_max;
 };
@@ -240,13 +255,11 @@ class MiraculousArm {
     // 读取 (线程安全, 非阻塞)
     bool get_positions_rad(std::array<double, 6>& pos) const;
     bool get_velocities_rad(std::array<double, 6>& vel) const;
-    bool get_positions_pulse(std::array<int32_t, 6>& pos) const;
     bool get_states(std::array<Cia402State_t, 6>& states) const;
     bool has_fault() const;
 
     // CSP 写入
     bool set_targets_rad(const std::array<double, 6>& targets);
-    bool set_targets_pulse(const std::array<int32_t, 6>& targets);
     void send_sync();
 
     // 安全
@@ -261,16 +274,18 @@ class MiraculousArm {
 |----------|---------|------|
 | `miraculous_motor_open` | `open_motors()` | 打开 6 个电机句柄 |
 | `miraculous_motor_bootstrap` | `init()` | NMT Reset → Operational |
+| `miraculous_motor_set_reduction_ratio` | `open_motors()` | 设置电机/负载减速比 |
 | `miraculous_motor_full_enable` | `enable_csp()` / `enable()` | PDS → Operation Enabled |
 | `miraculous_motor_set_mode` | `enable_csp()` | 设为 CIA_MODE_CSP |
-| `miraculous_motor_csp_init` | `enable_csp()` | `manual=true`, 不自动发 SYNC |
-| `miraculous_motor_csp_set_target` | `set_targets_pulse()` | 写入目标位置 (脉冲) |
-| `miraculous_motor_get_position` | `read_loop()` | 读取实际位置 (脉冲) |
-| `miraculous_motor_get_velocity` | `read_loop()` | 读取实际速度 (脉冲/s) |
+| `miraculous_motor_csp_init` | `enable_csp()` | `sync_period_us==0` 时手动 SYNC，否则 SDK 定时 SYNC |
+| `miraculous_motor_csp_set_target_ex` | `set_targets_rad()` | 写入目标位置 (电机侧 rad) |
+| `miraculous_motor_get_position_ex` | `read_loop()` | 读取实际位置 (电机侧 rad) |
+| `miraculous_motor_get_velocity_ex` | `read_loop()` | 读取实际速度 (负载侧 rad/s) |
 | `miraculous_motor_get_state` | `read_loop()` | 读取 PDS 状态 |
 | `miraculous_motor_poll` | `read_loop()` | 处理 CAN 事件 (EMCY 等) |
 | `miraculous_motor_get_can_ctx` | `open_motors()` | 获取共享 CAN 上下文 |
-| `miraculous_can_send` | `send_sync()` | 发送 SYNC 帧 (0x080) |
+| `miraculous_motor_sync_send` | `send_sync()` | 发送手动 SYNC |
+| `miraculous_motor_sync_stop` | `disable()` | 停止 SDK 定时 SYNC |
 | `miraculous_can_set_recv_callback` | `open_motors()` | 注册 EMCY 接收回调 |
 | `miraculous_motor_disable` | `disable()` | PDS → Switched On |
 | `miraculous_motor_quick_stop` | `quick_stop()` | 急停 |
@@ -289,7 +304,7 @@ class MiraculousArm {
 | `can_interface` | `can0` | SocketCAN 接口名 |
 | `baudrate` | `1000` | CAN 波特率 (kbps) |
 | `node_ids` | `1,2,3,4,5,6` | 6 个电机的 CANopen 节点 ID |
-| `pulses_per_radian` | `1000.0,...` | 每关节脉冲/弧度 (**需替换为真实值**) |
+| `reduction_ratio` | `100.0,...` | 每关节电机侧/负载侧减速比 (**需替换为真实值**) |
 | `sync_period_us` | `0` | 0=手动 SYNC, 非 0=SDK 定时器 |
 | `read_rate_hz` | `100.0` | 后台读取线程频率 |
 
@@ -300,8 +315,8 @@ class MiraculousArm {
 | `can_interface` | `can0` | CAN 接口 |
 | `baudrate` | `1000` | 波特率 |
 | `node_ids` | `1,2,3,4,5,6` | 节点 ID |
-| `pulses_per_radian` | — | 脉冲/弧度 (逗号分隔 6 个值) |
-| `pulses_per_radian_single` | `0.0` | 单值模式 (6 关节相同) |
+| `reduction_ratio` | — | 电机侧/负载侧减速比 (逗号分隔 6 个值) |
+| `reduction_ratio_single` | `0.0` | 单值模式 (6 关节相同) |
 | `joint_states_topic` | `/arm_joint_states` | 发布话题 |
 | `record_rate` | `50.0` | 录制频率 (Hz) |
 | `output_file` | `""` (自动时间戳) | CSV 输出路径 |
@@ -314,7 +329,7 @@ class MiraculousArm {
 | `can_interface` | `can0` | CAN 接口 |
 | `baudrate` | `1000` | 波特率 |
 | `node_ids` | `1,2,3,4,5,6` | 节点 ID |
-| `pulses_per_radian` | — | 脉冲/弧度 |
+| `reduction_ratio` | — | 电机侧/负载侧减速比 |
 | `joint_states_topic` | `/arm_joint_states` | 发布话题 |
 | `input_file` | `""` | 回放 CSV 路径 |
 | `speed_scale` | `1.0` | 回放速度倍率 |
@@ -327,7 +342,7 @@ class MiraculousArm {
 ### 6.1 构建
 
 ```bash
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-select miraculous_driver \
@@ -340,7 +355,7 @@ colcon build --symlink-install --packages-select miraculous_driver \
 install/miraculous_driver/
 ├── lib/
 │   ├── libmiraculous_driver.so              # 核心 wrapper + 插件
-│   ├── libmiraculous_sdk.so -> .../miraculous_sdk_x86_64/lib/...
+│   ├── libmiraculous_sdk.so -> .../miraculous_sdk_x86_64_linux_gnu_20260702/lib/...
 │   └── miraculous_driver/
 │       ├── teach_record_node                 # 示教记录可执行
 │       └── playback_node                     # 回放可执行
@@ -376,7 +391,7 @@ cat install/miraculous_driver/share/miraculous_driver/miraculous_driver_plugins.
 
 ### 6.4 CMakeLists 关键设计
 
-- **SDK 架构自动选择**: 根据 `CMAKE_SYSTEM_PROCESSOR` 选择 `miraculous_sdk_x86_64` 或 `miraculous_sdk`
+- **SDK 路径选择**: x86-64 默认使用 `miraculous_sdk_x86_64_linux_gnu_20260702`; 其他 SDK 通过 `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk` 指定
 - **库 vs 可执行文件安装路径**: 库 → `lib/` (pluginlib 查找), 可执行文件 → `lib/miraculous_driver/` (ros2 run 约定)
 - **RPATH**: `INSTALL_RPATH "$ORIGIN"` — 运行时在 .so 同级目录查找 `libmiraculous_sdk.so`
 - **SDK .so 安装**: `install(FILES ...)` 将预编译 SDK 库安装到 `lib/`
@@ -412,7 +427,7 @@ ros2 launch miraculous_driver real_control.launch.py
 ```bash
 # 启动 (电机去使能, 可自由拖动)
 ros2 launch miraculous_driver teach.launch.py \
-  pulses_per_radian:="1000.0,1000.0,1000.0,1000.0,1000.0,1000.0"
+  reduction_ratio:="100.0,100.0,100.0,100.0,100.0,100.0"
 
 # 开始录制
 ros2 service call /teach_record/start std_srvs/srv/Trigger
@@ -434,7 +449,7 @@ timestamp,J1,J2,J3,J4,J5,J6
 # 启动
 ros2 launch miraculous_driver playback.launch.py \
   input_file:="teach_20260622_140000.csv" \
-  pulses_per_radian:="1000.0,1000.0,1000.0,1000.0,1000.0,1000.0"
+  reduction_ratio:="100.0,100.0,100.0,100.0,100.0,100.0"
 
 # 开始回放
 ros2 service call /playback/play std_srvs/srv/Trigger
@@ -453,7 +468,7 @@ ros2 service call /playback/stop std_srvs/srv/Trigger
 
 **原因**: 原始 SDK 库是 ARM aarch64 架构, 开发机是 x86_64
 
-**修复**: 用户提供 x86_64 SDK (`miraculous_sdk_x86_64/`), CMakeLists 根据 `CMAKE_SYSTEM_PROCESSOR` 自动选择
+**修复**: 使用当前 x86_64 SDK (`miraculous_sdk_x86_64_linux_gnu_20260702/`); ARM/aarch64 或其他 SDK 通过 `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk` 显式指定
 
 ### 8.2 csp_init API 变更
 
@@ -521,7 +536,7 @@ install(TARGETS teach_record_node playback_node RUNTIME DESTINATION lib/${PROJEC
 
 ## 9. 待办事项
 
-- [ ] 在 `config/miraculous_arm_params.yaml` 和 xacro 中填入真实 `pulses_per_radian` 值
+- [ ] 在 `config/miraculous_arm_params.yaml` 和 xacro 中填入真实 `reduction_ratio` 值
 - [ ] 在 ARM 目标机上用真实 CAN 总线进行端到端测试
 - [ ] 验证 SDK 风险项 (见计划文件):
   - `csp_set_target` 是否自动发 SYNC (当前假设不自动发)

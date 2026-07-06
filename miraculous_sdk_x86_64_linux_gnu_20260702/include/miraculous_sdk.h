@@ -17,6 +17,13 @@
 #ifndef MIRACULOUS_SDK_H
 #define MIRACULOUS_SDK_H
 
+/*--- SDK 版本 ---*/
+#define MIRACULOUS_SDK_VERSION_MAJOR  1
+#define MIRACULOUS_SDK_VERSION_MINOR  0
+#define MIRACULOUS_SDK_VERSION_PATCH  0
+#define MIRACULOUS_SDK_VERSION        "1.0.0"
+
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -24,8 +31,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/*============================================================================*
+ /*============================================================================
  * 错误码定义
  *============================================================================*/
 
@@ -148,6 +154,9 @@ typedef enum {
     CIA402_OD_MIT_CONTROL               = 0x2005,
     CIA402_OD_SERVO_TEMPERATURE         = 0x2006,
     CIA402_OD_MIT_TORQUE_LIMIT          = 0x2102,
+    CIA402_OD_HOME_OFFSET               = 0x607C,
+    CIA402_OD_ENC_ZERO_POINT            = 0x2007,
+    CIA402_OD_ENC_ZERO_KI               = 0x2008,
 } Cia402OdIndex_t;
 
 /*--- CiA402 操作模式 ---*/
@@ -172,6 +181,28 @@ typedef enum {
     CIA_PROFILE_LINEAR = 0,  /*!< T 型曲线 (梯形) */
     CIA_PROFILE_SCURVE = 1,  /*!< S 型曲线 (正弦) */
 } CiaProfileType_t;
+
+/**
+ * @brief 位置单位枚举
+ *
+ * 用于 miraculous_motor_get_position_ex() 指定返回值的单位。
+ */
+typedef enum {
+    POS_UNIT_DEGREE = 0,  /*!< 角度 (度) */
+    POS_UNIT_RADIAN = 1,  /*!< 弧度 (rad) */
+} PosUnit_t;
+
+/*--- 速度侧枚举 ---*/
+typedef enum {
+    VEL_SIDE_MOTOR = 0,  /*!< 电机侧 */
+    VEL_SIDE_LOAD  = 1,  /*!< 负载侧 (需除以减速比) */
+} VelSide_t;
+
+/*--- 速度单位枚举 ---*/
+typedef enum {
+    VEL_UNIT_RPM   = 0,  /*!< 转/分钟 (RPM) */
+    VEL_UNIT_RAD_S = 1,  /*!< 弧度/秒 (rad/s) */
+} VelUnit_t;
 
 /*--- CiA402 PDS 状态 ---*/
 typedef enum {
@@ -306,7 +337,7 @@ typedef void (*MiraHeartbeatCallback)(uint8_t node_id, CoNmtState_t state,
 /**
  * @brief TPDO 接收回调函数类型
  *
- * 注册方式: 通过底层 PDO 配置接口注册。
+ * 注册方式: 通过 miraculous_motor_set_tpdo_callback() 设置。
  * 当电机通过 TPDO 主动上报数据时触发。
  *
  * 使用示例:
@@ -319,6 +350,8 @@ typedef void (*MiraHeartbeatCallback)(uint8_t node_id, CoNmtState_t state,
  *         printf("%02X ", data[i]);
  *     printf("\n");
  * }
+ *
+ * miraculous_motor_set_tpdo_callback(motor, my_tpdo, NULL);
  * @endcode
  *
  * @param node_id  节点 ID
@@ -416,7 +449,7 @@ int miraculous_can_set_recv_callback(MiraCanCtx *ctx,
  * @param can_id    期望的 CAN ID (仅接收该 ID 的帧)
  * @param data_out  接收数据缓冲区
  * @param len_out   输出: 实际接收的数据长度
- * @param timeout_ms 超时时间, 单位 ms, -1 表示无限等待
+ * @param timeout_ms 超时时间, 单位 ms, 0 表示无限等待
  * @return 成功返回 0, 超时返回负值
  */
 int miraculous_can_recv_timeout(MiraCanCtx *ctx, uint32_t can_id,
@@ -461,6 +494,20 @@ MiraMotor* miraculous_motor_open(const char *ifname,
 void miraculous_motor_close(MiraMotor *motor);
 
 /**
+ * @brief 获取 SDK 版本信息
+ *
+ * @return 版本字符串, 如 "1.0.0"
+ */
+const char* miraculous_sdk_version(void);
+
+/**
+ * @brief 获取 SDK 编译时间
+ *
+ * @return 编译时间字符串, 如 "Jun 30 2026 10:30:00"
+ */
+const char* miraculous_sdk_build_time(void);
+
+/**
  * @brief 一键初始化电机
  *
  * 执行 NMT Reset 节点, 等待节点重新上线进入 Operational 状态,
@@ -471,6 +518,55 @@ void miraculous_motor_close(MiraMotor *motor);
  * @return 成功返回 0, 失败返回其他
  */
 int miraculous_motor_bootstrap(MiraMotor *motor, int timeout_ms);
+
+/**
+ * @brief 向电机节点发送 NMT 命令
+ *
+ * @param motor 电机句柄
+ * @param cmd   NMT 命令 (如 CO_NMT_STOP_NODE / CO_NMT_RESET_NODE 等)
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * miraculous_motor_nmt_send(motor, CO_NMT_STOP_NODE);   // 停止节点
+ * miraculous_motor_nmt_send(motor, CO_NMT_RESET_NODE);  // 复位节点
+ * @endcode
+ */
+int miraculous_motor_nmt_send(MiraMotor *motor, CoNmtCommand_t cmd);
+
+/*--- SYNC 同步帧管理 ---*/
+
+/**
+ * @brief 启动周期 SYNC 帧发送
+ *
+ * 使用 timerfd 高精度定时器, 以指定周期持续发送 SYNC 帧 (CAN ID=0x080)。
+ * 用于 CSP/CSV/CST/MIT 等周期同步模式。
+ * 重复调用会重新设置周期。
+ *
+ * @param motor     电机句柄
+ * @param period_us SYNC 周期, 单位 us (微秒), 如 10000 = 10ms
+ * @return 成功返回 0, 失败返回其他
+ */
+int miraculous_motor_sync_start(MiraMotor *motor, uint32_t period_us);
+
+/**
+ * @brief 停止周期 SYNC 帧发送
+ *
+ * @param motor 电机句柄
+ * @return 成功返回 0, 失败返回其他
+ */
+int miraculous_motor_sync_stop(MiraMotor *motor);
+
+/**
+ * @brief 手动发送一帧 SYNC
+ *
+ * 在 manual 模式下, 由用户主动调用此函数发送 SYNC 帧,
+ * 触发从站采样输入并更新输出。
+ *
+ * @param motor 电机句柄
+ * @return 成功返回 0, 失败返回其他
+ */
+int miraculous_motor_sync_send(MiraMotor *motor);
 
 /*--- CiA402 PDS 状态机控制 ---*/
 
@@ -706,13 +802,13 @@ int miraculous_motor_pt_move(MiraMotor *motor,
  *
  * 配置 PDO 映射并启动 SYNC 信号, 使电机进入周期同步位置模式。
  * 初始化后通过 csp_set_target 周期性写入目标位置。
- * 调用前需通过 set_mode 设为 CIA_MODE_CSP。
  *
  * @param motor          电机句柄
- * @param sync_period_us SYNC 周期, 单位 us (微秒)
+ * @param sync_period_us SYNC 周期, 单位 us (微秒). manual=false 时有效.
+ * @param manual         true=手动模式(不发SYNC), false=定时器模式
  * @return 成功返回 0, 失败返回其他
  */
-int miraculous_motor_csp_init(MiraMotor *motor, uint32_t sync_period_us);
+int miraculous_motor_csp_init(MiraMotor *motor, uint32_t sync_period_us, bool manual);
 
 /**
  * @brief CSP 模式设置目标位置
@@ -725,6 +821,26 @@ int miraculous_motor_csp_init(MiraMotor *motor, uint32_t sync_period_us);
  * @return 成功返回 0, 失败返回其他
  */
 int miraculous_motor_csp_set_target(MiraMotor *motor, int32_t target_pos);
+
+/**
+ * @brief CSP 模式设置目标位置, 支持角度/弧度单位
+ *
+ * 将角度或弧度值转换为编码器脉冲后, 通过 PDO 写入目标位置。
+ * 转换公式:
+ *   脉冲数 = 角度 × 2^bw / 360°
+ *   脉冲数 = 弧度 × 2^bw / 2π
+ *
+ * @param motor      电机句柄
+ * @param target_pos 目标位置, 根据 unit 参数决定单位
+ * @param unit       单位枚举: POS_UNIT_DEGREE 或 POS_UNIT_RADIAN
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * miraculous_motor_csp_set_target_ex(motor, 90.0f, POS_UNIT_DEGREE);
+ * @endcode
+ */
+int miraculous_motor_csp_set_target_ex(MiraMotor *motor, float target_pos, PosUnit_t unit);
 
 /*--- CSV 周期同步速度模式 ---*/
 
@@ -849,13 +965,139 @@ int miraculous_motor_mit_set_target(MiraMotor *motor, int32_t target_pos);
 int miraculous_motor_get_position(MiraMotor *motor, int32_t *pos);
 
 /**
+ * @brief 读取电机实际位置并转换单位 (0x6064)
+ *
+ * 根据指定的单位 (度/弧度) 返回实际位置。
+ * 转换公式:
+ *   角度 = 脉冲数 × 360° / 2^bw
+ *   弧度 = 脉冲数 × 2π / 2^bw
+ * 其中 bw 为编码器位宽, 默认 19 (524288 counts/rev),
+ * 可通过 miraculous_motor_set_encoder_bw() 修改。
+ *
+ * @param motor 电机句柄
+ * @param pos   输出: 实际位置 (float), 根据 unit 参数决定单位
+ * @param unit  单位枚举: POS_UNIT_DEGREE 或 POS_UNIT_RADIAN
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * float pos_deg, pos_rad;
+ * miraculous_motor_get_position_ex(motor, &pos_deg, POS_UNIT_DEGREE);
+ * miraculous_motor_get_position_ex(motor, &pos_rad, POS_UNIT_RADIAN);
+ * @endcode
+ */
+int miraculous_motor_get_position_ex(MiraMotor *motor, float *pos, PosUnit_t unit);
+
+/**
+ * @brief 设置电机目标位置并转换单位 (0x607A)
+ *
+ * 根据指定的单位 (度/弧度) 设置目标位置。
+ * 内部将角度值转换为编码器脉冲后写入 0x607A。
+ * 转换公式:
+ *   脉冲数 = 角度 × 2^bw / 360°
+ *   脉冲数 = 弧度 × 2^bw / 2π
+ * 其中 bw 为编码器位宽, 默认 19 (524288 counts/rev)。
+ *
+ * @param motor 电机句柄
+ * @param pos   目标位置, 根据 unit 参数决定单位
+ * @param unit  单位枚举: POS_UNIT_DEGREE 或 POS_UNIT_RADIAN
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * miraculous_motor_set_target_position_ex(motor, 90.0f, POS_UNIT_DEGREE);  // 转 90°
+ * miraculous_motor_set_target_position_ex(motor, 3.14159f, POS_UNIT_RADIAN); // 转 π rad
+ * @endcode
+ */
+int miraculous_motor_set_target_position_ex(MiraMotor *motor, float pos, PosUnit_t unit);
+
+/**
+ * @brief 将当前位置设为零点 (0x607C)
+ *
+ * 先将 CiA402 Home Offset (0x607C) 复位为 0, 读取当前实际位置 (0x6064),
+ * 再将读到的位置值写入 Home Offset。
+ * 固件计算公式: ActualPosition = RawPosition - HomeOffset,
+ * 因此 HomeOffset = 当前 RawPosition 即可使当前位置归零。
+ *
+ * 如需掉电保持, 请在调用后执行 miraculous_motor_save_config()。
+ *
+ * @param motor 电机句柄
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * int ret = miraculous_motor_set_zero_position(motor);
+ * if (ret == 0) {
+ *     printf("Zero position set\n");
+ *     miraculous_motor_save_config(motor);  // 掉电保持
+ * }
+ * @endcode
+ */
+int miraculous_motor_set_zero_position(MiraMotor *motor);
+
+/**
+ * @brief 设置编码器位宽 (分辨率)
+ *
+ * 配置用于 miraculous_motor_get_position_ex() 位置单位转换的编码器分辨率。
+ * 分辨率 = 2^bw counts/revolution。
+ * 默认值为 19 (即 524288 counts/rev), 通常无需调用。
+ * 仅当编码器硬件位宽与默认值不同时才需设置。
+ *
+ * @param motor 电机句柄
+ * @param bw    编码器位宽 (有效范围 1~31)
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * miraculous_motor_set_encoder_bw(motor, 17);  // 17-bit, 131072 counts/rev
+ * @endcode
+ */
+int miraculous_motor_set_encoder_bw(MiraMotor *motor, uint8_t bw);
+
+/**
+ * @brief 设置减速比
+ *
+ * 用于 miraculous_motor_get_velocity_ex() 的负载侧速度换算。
+ * 负载侧速度 = 电机侧速度 / 减速比。
+ * 默认值为 100。
+ *
+ * @param motor 电机句柄
+ * @param ratio 减速比 (如 100.0)
+ * @return 成功返回 0, 失败返回其他
+ */
+int miraculous_motor_set_reduction_ratio(MiraMotor *motor, float ratio);
+
+/**
  * @brief 读取电机实际速度 (0x606C)
  *
  * @param motor 电机句柄
- * @param vel   输出: 实际速度, 单位脉冲/s
+ * @param vel   输出: 实际速度, 单位 RPM
  * @return 成功返回 0, 失败返回其他
  */
 int miraculous_motor_get_velocity(MiraMotor *motor, int32_t *vel);
+
+/**
+ * @brief 读取电机实际速度并转换单位 (0x606C)
+ *
+ * 可指定电机侧或负载侧、RPM 或 rad/s。
+ * 负载侧速度 = 电机侧速度 / 减速比。
+ * 减速比默认 100, 可通过 miraculous_motor_set_reduction_ratio() 修改。
+ *
+ * @param motor 电机句柄
+ * @param vel   输出: 实际速度 (float)
+ * @param side  侧: VEL_SIDE_MOTOR(电机侧) 或 VEL_SIDE_LOAD(负载侧)
+ * @param unit  单位: VEL_UNIT_RPM 或 VEL_UNIT_RAD_S
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * float rpm_motor, rads_load;
+ * miraculous_motor_get_velocity_ex(motor, &rpm_motor, VEL_SIDE_MOTOR, VEL_UNIT_RPM);
+ * miraculous_motor_get_velocity_ex(motor, &rads_load, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
+ * @endcode
+ */
+int miraculous_motor_get_velocity_ex(MiraMotor *motor, float *vel,
+                                      VelSide_t side, VelUnit_t unit);
 
 /**
  * @brief 读取电机实际转矩 (0x6077)
@@ -1062,6 +1304,149 @@ int miraculous_motor_set_heartbeat_callback(MiraMotor *motor,
 int miraculous_motor_set_heartbeat_scan(MiraMotor *motor,
                                          MiraHeartbeatCallback callback,
                                          void *user_data);
+
+/**
+ * @brief 注册 TPDO 接收回调
+ *
+ * 当该电机节点通过 TPDO 主动上报数据时触发回调。
+ * 与内部 TPDO 缓存 (get_position/get_velocity) 共存。
+ *
+ * @param motor    电机句柄
+ * @param callback TPDO 回调函数, 可为 NULL 注销
+ * @param user_data 用户自定义数据, 传入回调
+ * @return MRC_SUCCESS 或负值错误码
+ */
+int miraculous_motor_set_tpdo_callback(MiraMotor *motor,
+                                        MiraTpdoCallback callback,
+                                        void *user_data);
+
+/**
+ * @brief 注册 EMCY 紧急事件回调
+ *
+ * 当电机发生故障时触发回调, 获取错误码和诊断数据。
+ *
+ * @param motor    电机句柄
+ * @param callback EMCY 回调函数, 可为 NULL 注销
+ * @param user_data 用户自定义数据, 传入回调
+ * @return MRC_SUCCESS 或负值错误码
+ */
+int miraculous_motor_set_emcy_callback(MiraMotor *motor,
+                                        MiraEmcyCallback callback,
+                                        void *user_data);
+
+/**
+ * @brief 配置从站 RPDO (接收 PDO) 通信与映射参数
+ *
+ * 通过 SDO 配置从站指定 RPDO 的 COB-ID、传输类型和映射对象。
+ * 配置流程: 禁用 → 设置传输类型 → 清空映射 → 设置映射 → 写映射数 → 启用。
+ *
+ * @param motor        电机句柄
+ * @param pdo_num      PDO 编号 (1~4)
+ * @param cob_id       COB-ID (如 0x200+node_id)
+ * @param trans_type   传输类型:
+ *                       0   = 同步非周期 (远程帧触发)
+ *                       1   = 同步周期 (每个 SYNC 触发一次)
+ *                       2~240 = 每 N 个 SYNC 触发一次
+ *                       254 = 异步 (事件/制造商特定)
+ *                       255 = 异步 (事件/设备特定)
+ * @param event_timer_ms 事件定时器 (sub5, 单位 ms, 0=禁用);
+ *                        异步模式下定时触发 PDO 发送
+ * @param mapped_count 映射对象个数 (0~8)
+ * @param mappings     映射数组, 每个元素为 32 位映射值, 格式:
+ *                      Bit 31..16: 对象索引 (如 0x6040)
+ *                      Bit 15.. 8: 子索引 (通常 0x00)
+ *                      Bit  7.. 0: 数据长度 (位)
+ *
+ *                      常用数据长度编码:
+ *                      长度 (位) | 长度 (字节) | 编码值
+ *                      ---------|------------|------
+ *                       8       | 1 字节     | 0x08
+ *                      16       | 2 字节     | 0x10
+ *                      24       | 3 字节     | 0x18
+ *                      32       | 4 字节     | 0x20
+ *                      40       | 5 字节     | 0x28
+ *                      48       | 6 字节     | 0x30
+ *                      56       | 7 字节     | 0x38
+ *                      64       | 8 字节     | 0x40
+ *
+ *                      常用映射值:
+ *                      值                    | 对象          | 长度
+ *                      ----------------------|---------------|-----
+ *                      0x60400010            | 控制字        | 16位
+ *                      0x60410010            | 状态字        | 16位
+ *                      0x60600008            | 操作模式      | 8位
+ *                      0x60610008            | 模式显示      | 8位
+ *                      0x60640020            | 实际位置      | 32位
+ *                      0x606C0020            | 实际速度      | 32位
+ *                      0x60770010            | 实际转矩      | 16位
+ *                      0x607A0020            | 目标位置      | 32位
+ *                      0x60FF0020            | 目标速度      | 32位
+ *                      0x60710010            | 目标转矩      | 16位
+ *                      0x60810020            | 轮廓速度      | 32位
+ *                      0x603F0010            | 错误码        | 16位
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * uint32_t maps[] = { 0x60400010, 0x607A0020 }; // controlword + target pos
+ * miraculous_motor_rpdo_config(motor, 1, 0x200 + node_id, 255, 0, 2, maps);
+ * @endcode
+ */
+int miraculous_motor_rpdo_config(MiraMotor *motor, uint8_t pdo_num,
+                                  uint32_t cob_id, uint8_t trans_type,
+                                  uint16_t event_timer_ms,
+                                  uint8_t mapped_count,
+                                  const uint32_t *mappings);
+
+/**
+ * @brief 发送 RPDO 数据帧
+ *
+ * 直接向总线发送一帧 RPDO 数据, 从站根据 PDO 映射解析。
+ *
+ * @param motor   电机句柄
+ * @param pdo_num PDO 编号 (1~4)
+ * @param data    数据缓冲区
+ * @param len     数据长度 (字节)
+ * @return 成功返回 0, 失败返回其他
+ */
+int miraculous_motor_rpdo_send(MiraMotor *motor, uint8_t pdo_num,
+                                const uint8_t *data, uint8_t len);
+
+/**
+ * @brief 配置从站 TPDO (发送 PDO) 通信与映射参数
+ *
+ * 通过 SDO 配置从站指定 TPDO 的 COB-ID、传输类型、禁止时间和映射对象。
+ * 配置流程: 禁用 → 设置传输类型 → 清空映射 → 设置映射 → 写映射数 → 设禁止时间 → 设事件定时器 → 启用。
+ *
+ * 注意: 若传输类型使用同步模式 (0~240), 从站需收到 SYNC 帧才会触发上报,
+ * 主站应调用 miraculous_motor_sync_start() 启动 SYNC 定时器。
+ *
+ * @param motor        电机句柄
+ * @param pdo_num      PDO 编号 (1~4)
+ * @param cob_id       COB-ID (如 0x180+node_id)
+ * @param trans_type   传输类型:
+ *                       0   = 同步非周期 (远程帧触发)
+ *                       1   = 同步周期 (每个 SYNC 触发一次)
+ *                       2~240 = 每 N 个 SYNC 触发一次
+ *                       254 = 异步 (事件/制造商特定)
+ *                       255 = 异步 (事件/设备特定)
+ * @param inhibit_time 禁止时间 (sub3, 单位 100μs, 0=禁用)
+ * @param event_timer_ms 事件定时器 (sub5, 单位 ms, 0=禁用)
+ * @param mapped_count 映射对象个数 (0~8)
+ * @param mappings     映射数组, 格式同 rpdo_config
+ * @return 成功返回 0, 失败返回其他
+ *
+ * 使用示例:
+ * @code{.c}
+ * uint32_t maps[] = { 0x60640020, 0x606C0020 }; // actual pos + vel
+ * miraculous_motor_tpdo_config(motor, 1, 0x180 + node_id, 255, 0, 2, maps);
+ * @endcode
+ */
+int miraculous_motor_tpdo_config(MiraMotor *motor, uint8_t pdo_num,
+                                  uint32_t cob_id, uint8_t trans_type,
+                                  uint8_t inhibit_time, uint16_t event_timer_ms,
+                                  uint8_t mapped_count,
+                                  const uint32_t *mappings);
 
 /**
  * @brief 轮询电机所属总线的 CANopen 事件

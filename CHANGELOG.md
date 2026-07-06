@@ -1,5 +1,39 @@
 # Changelog
 
+## 2026-07-06
+
+### Miraculous SDK Consolidation
+
+- Removed older SDK snapshots:
+  - `miraculous_sdk/`
+  - `miraculous_sdk_x86_64/`
+- Kept the current SDK snapshot as the default x86-64 driver dependency:
+  - `miraculous_sdk_x86_64_linux_gnu_20260702/`
+- `miraculous_driver` now defaults to the 2026-07-02 SDK snapshot and requires `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk` for any non-default SDK or target architecture.
+- Current ROS-facing calibration parameter is `reduction_ratio`; old `pulses_per_radian` and placeholder-calibration paths have been removed from the driver stack.
+
+## 2026-06-30
+
+### Real Hardware First-Stage Safety Gate
+
+- Added a real hardware bring-up runbook:
+  - `ros2_ws/src/arm_motion_stack/miraculous_driver/docs/REAL_HARDWARE_BRINGUP.md`
+- Exposed real hardware parameters through `arm.urdf.xacro` and `ros2_control.xacro`:
+  - `can_interface`
+  - `baudrate`
+  - `node_ids`
+  - `reduction_ratio`
+  - `position_min`
+  - `position_max`
+  - `sync_period_us`
+  - `read_rate_hz`
+- Hardened real motion paths:
+  - `MiraculousSystem`, `trajectory_tracking_test_node`, and `playback_node` validate `reduction_ratio` before opening motors.
+  - Motion-capable paths now pass `position_min` / `position_max` into `JointConfig` so `MiraculousArm::check_limits()` can clamp commanded targets.
+  - `trajectory_tracking_test_node` defaults are now conservative for first bring-up: `amplitude:=0.03`, `period:=6.0`, `duration:=3.0`.
+- Updated real hardware launch files to pass the same parameter set to `robot_state_publisher` and `ros2_control_node`.
+- Updated documentation paths from `/home/alienware/Desktop/PersonalProject` to `/home/alienware/Documents/PersonalProject`.
+
 ## 2026-06-22
 
 ### miraculous_driver ROS 2 Package
@@ -27,19 +61,19 @@
   - Services: `/playback/play`, `/playback/stop`.
   - Supports `speed_scale` and `loop` parameters.
 - Launch files: `real_control.launch.py`, `moveit_real.launch.py`, `teach.launch.py`, `playback.launch.py`.
-- Config files: `real_ros2_controllers.yaml`, `miraculous_arm_params.yaml` (pulses_per_radian placeholder for user to fill).
-- CMakeLists auto-selects SDK based on host architecture: `miraculous_sdk_x86_64` for x86-64 dev host, `miraculous_sdk` for ARM aarch64 target.
+- Config files: `real_ros2_controllers.yaml`, `miraculous_arm_params.yaml` (`reduction_ratio` and software-limit placeholders for user to fill).
+- CMakeLists defaults to the current 2026-07-02 x86-64 SDK snapshot: `miraculous_sdk_x86_64_linux_gnu_20260702`. Other SDK builds must be supplied explicitly with `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk`.
 - Build verified:
 
 ```bash
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-select miraculous_driver --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
 ```
 
 - Plugin discovery confirmed; executables registered as `miraculous_driver teach_record_node` and `miraculous_driver playback_node`.
-- Next steps: fill in real `pulses_per_radian` values in `miraculous_arm_params.yaml`; test on ARM target with real CAN bus.
+- Next steps: fill in real `reduction_ratio` and software-limit values in `miraculous_arm_params.yaml`; test on real CAN bus.
 
 ## 2026-06-16
 
@@ -70,7 +104,7 @@ Validation:
 - Full workspace build passed with system Python:
 
 ```bash
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
@@ -80,7 +114,7 @@ colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python
 
 ### Repository Initialization
 
-- Initialized `/home/alienware/Desktop/PersonalProject` as a Git repository.
+- Initialized `/home/alienware/Documents/PersonalProject` as a Git repository.
 - Renamed the initial branch to `main`.
 - Added `.gitignore` to keep generated colcon output, editor state, logs, and binary runtime artifacts out of version control.
 - Added this root changelog and a root README so future work has a stable entry point.
@@ -137,7 +171,7 @@ colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python
 - The ROS build should be run with system Python to avoid Miniconda interference:
 
 ```bash
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
@@ -246,7 +280,7 @@ colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python
 - Rebuilt the workspace successfully with system Python:
 
 ```bash
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3

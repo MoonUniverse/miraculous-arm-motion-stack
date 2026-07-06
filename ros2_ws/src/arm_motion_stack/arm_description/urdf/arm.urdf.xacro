@@ -1,6 +1,14 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ARM">
   <xacro:arg name="hardware_type" default="fake"/>
+  <xacro:arg name="can_interface" default="can0"/>
+  <xacro:arg name="baudrate" default="1000"/>
+  <xacro:arg name="node_ids" default="1,2,3,4,5,6"/>
+  <xacro:arg name="reduction_ratio" default="100.0,100.0,100.0,100.0,100.0,100.0"/>
+  <xacro:arg name="position_min" default="0.0,0.0,0.0,0.0,0.0,0.0"/>
+  <xacro:arg name="position_max" default="0.0,0.0,0.0,0.0,0.0,0.0"/>
+  <xacro:arg name="sync_period_us" default="0"/>
+  <xacro:arg name="read_rate_hz" default="100.0"/>
 
   <xacro:include filename="materials.xacro"/>
   <!-- Converted from urdf/original/ARM.urdf; link and joint names are preserved. -->
@@ -15,5 +23,15 @@
     <child link="tool0"/>
   </joint>
 
-  <xacro:arm_ros2_control name="ARMSystem" hardware_type="$(arg hardware_type)"/>
+  <xacro:arm_ros2_control
+    name="ARMSystem"
+    hardware_type="$(arg hardware_type)"
+    can_interface="$(arg can_interface)"
+    baudrate="$(arg baudrate)"
+    node_ids="$(arg node_ids)"
+    reduction_ratio="$(arg reduction_ratio)"
+    position_min="$(arg position_min)"
+    position_max="$(arg position_max)"
+    sync_period_us="$(arg sync_period_us)"
+    read_rate_hz="$(arg read_rate_hz)"/>
 </robot>

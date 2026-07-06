@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
-  <xacro:macro name="arm_ros2_control" params="name hardware_type">
+  <xacro:macro name="arm_ros2_control" params="name hardware_type can_interface baudrate node_ids reduction_ratio position_min position_max sync_period_us read_rate_hz">
     <ros2_control name="${name}" type="system">
       <hardware>
         <xacro:if value="${hardware_type == 'fake'}">
@@ -20,13 +20,14 @@
         </xacro:if>
         <xacro:if value="${hardware_type == 'real'}">
           <plugin>miraculous_driver/MiraculousSystem</plugin>
-          <param name="can_interface">can0</param>
-          <param name="baudrate">1000</param>
-          <param name="node_ids">1,2,3,4,5,6</param>
-          <!-- pulses_per_radian = counts_per_rev * gear_ratio / (2*pi). TODO: replace with real per-joint values. -->
-          <param name="pulses_per_radian">1000.0,1000.0,1000.0,1000.0,1000.0,1000.0</param>
-          <param name="sync_period_us">0</param>
-          <param name="read_rate_hz">100.0</param>
+          <param name="can_interface">${can_interface}</param>
+          <param name="baudrate">${baudrate}</param>
+          <param name="node_ids">${node_ids}</param>
+          <param name="reduction_ratio">${reduction_ratio}</param>
+          <param name="position_min">${position_min}</param>
+          <param name="position_max">${position_max}</param>
+          <param name="sync_period_us">${sync_period_us}</param>
+          <param name="read_rate_hz">${read_rate_hz}</param>
         </xacro:if>
       </hardware>
 

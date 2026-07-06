@@ -9,7 +9,7 @@ This project keeps the original SolidWorks-exported URDF intact and builds ROS 2
 The repository-level setup and this stack bootstrap are recorded in:
 
 ```text
-/home/alienware/Desktop/PersonalProject/CHANGELOG.md
+/home/alienware/Documents/PersonalProject/CHANGELOG.md
 ```
 
 Detailed implementation and troubleshooting notes are recorded in:
@@ -18,9 +18,15 @@ Detailed implementation and troubleshooting notes are recorded in:
 ros2_ws/src/arm_motion_stack/docs/IMPLEMENTATION_DETAILS.md
 ```
 
+Real hardware first-stage CAN/encoder and single-joint CSP bring-up is recorded in:
+
+```text
+ros2_ws/src/arm_motion_stack/miraculous_driver/docs/REAL_HARDWARE_BRINGUP.md
+```
+
 ## Current URDF Source
 
-- Original source in this workspace: `/home/alienware/Desktop/PersonalProject/arm_description/urdf/ARM.urdf`
+- Original source in this workspace: `/home/alienware/Documents/PersonalProject/arm_description/urdf/ARM.urdf`
 - Preserved copy: `ros2_ws/src/arm_motion_stack/arm_description/urdf/original/ARM.urdf`
 - ROS 2 model entry point: `ros2_ws/src/arm_motion_stack/arm_description/urdf/arm.urdf.xacro`
 - Xacro-converted model copy: `ros2_ws/src/arm_motion_stack/arm_description/urdf/original/ARM.model.urdf.xacro`
@@ -97,7 +103,7 @@ sudo apt install -y \
 ## Build
 
 ```bash
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --symlink-install
 source install/setup.bash
@@ -106,7 +112,7 @@ source install/setup.bash
 ## Validate URDF
 
 ```bash
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 source /opt/ros/humble/setup.bash
 ros2 run xacro xacro src/arm_motion_stack/arm_description/urdf/arm.urdf.xacro > /tmp/arm.urdf
 check_urdf /tmp/arm.urdf
@@ -167,7 +173,7 @@ launch remap resolves it to the selected topic.
 Isaac Sim backend:
 
 ```bash
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ROS_LOG_DIR=/tmp/ros-log ros2 run arm_isaac_sim arm_isaac_ros_bridge.py
@@ -180,8 +186,8 @@ cd /home/alienware/Documents/xlerobot/IsaacLab
 source /home/alienware/miniconda3/etc/profile.d/conda.sh
 conda activate env_isaaclab
 env TERM=xterm PYTHONDONTWRITEBYTECODE=1 ./isaaclab.sh -p \
-  /home/alienware/Desktop/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/scripts/arm_isaac_backend.py \
-  --backend_config /home/alienware/Desktop/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/config/arm_isaac_backend.yaml \
+  /home/alienware/Documents/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/scripts/arm_isaac_backend.py \
+  --backend_config /home/alienware/Documents/PersonalProject/ros2_ws/src/arm_motion_stack/arm_isaac_sim/config/arm_isaac_backend.yaml \
   --headless --force_exit
 ```
 
@@ -216,7 +222,7 @@ After the three Isaac backend terminals above are running, execute a MoveIt
 trajectory from a fourth ROS terminal:
 
 ```bash
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 
@@ -356,12 +362,19 @@ Avoid renaming the current single-arm joints in this package. Use xacro prefixes
 
 MoveIt currently uses standard time parameterization. Add Ruckig by installing the MoveIt Ruckig smoothing plugin and configuring request adapters/time parameterization after real velocity, acceleration, and jerk limits are known.
 
-## Real Hardware Interface Extension
+## Real Hardware Interface
 
-Add a new ros2_control hardware plugin package when the real arm protocol is available. Keep the controller names and joints stable:
+The current real hardware path is implemented in `miraculous_driver` through the
+`miraculous_driver/MiraculousSystem` ros2_control plugin and
+`hardware_type:=real`. Use the first-stage runbook before attempting full
+MoveIt execution:
+
+```text
+ros2_ws/src/arm_motion_stack/miraculous_driver/docs/REAL_HARDWARE_BRINGUP.md
+```
+
+Keep the controller names and joints stable:
 
 - `joint_state_broadcaster`
 - `arm_controller`
 - joints: `J1`, `J2`, `J3`, `J4`, `J5`, `J6`
-
-Then add a new xacro hardware mode such as `hardware_type:=real` in `arm_description/urdf/ros2_control.xacro`.

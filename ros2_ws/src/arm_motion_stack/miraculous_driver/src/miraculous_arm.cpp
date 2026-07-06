@@ -6,11 +6,6 @@
 
 namespace miraculous_driver
 {
-namespace
-{
-constexpr uint32_t kSyncCanId = 0x080;  // CANopen SYNC COB-ID
-}
-
 MiraculousArm::MiraculousArm()
 {
   for (size_t i = 0; i < kArmJoints; ++i) {
@@ -39,11 +34,11 @@ bool MiraculousArm::init(const ArmConfig & config)
     return false;
   }
   for (size_t i = 0; i < kArmJoints; ++i) {
-    if (config_.joints[i].pulses_per_radian <= 0.0) {
+    if (config_.joints[i].reduction_ratio <= 0.0) {
       std::fprintf(stderr,
-        "[miraculous_arm] init: joint %zu (%s) has invalid pulses_per_radian=%g\n",
+        "[miraculous_arm] init: joint %zu (%s) has invalid reduction_ratio=%g\n",
         i, config_.joints[i].name.c_str(),
-        config_.joints[i].pulses_per_radian);
+        config_.joints[i].reduction_ratio);
       return false;
     }
   }
@@ -110,6 +105,20 @@ bool MiraculousArm::open_motors()
       }
       return false;
     }
+    if (miraculous_motor_set_reduction_ratio(
+        motors_[i], static_cast<float>(config_.joints[i].reduction_ratio)) < 0)
+    {
+      std::fprintf(stderr,
+        "[miraculous_arm] open: failed to set reduction ratio for joint %zu (node %u)\n",
+        i, config_.joints[i].node_id);
+      miraculous_motor_close(motors_[i]);
+      motors_[i] = nullptr;
+      for (size_t j = 0; j < i; ++j) {
+        miraculous_motor_close(motors_[j]);
+        motors_[j] = nullptr;
+      }
+      return false;
+    }
   }
   can_ctx_ = miraculous_motor_get_can_ctx(motors_[0]);
   // Register a shared CAN receive callback for EMCY detection.
@@ -137,8 +146,8 @@ bool MiraculousArm::enable_csp()
       std::fprintf(stderr, "[miraculous_arm] enable_csp: set CSP mode failed joint %zu\n", i);
       return false;
     }
-    // manual=true: SDK won't auto-send SYNC; wrapper sends one unified SYNC per cycle.
-    if (miraculous_motor_csp_init(motors_[i], config_.sync_period_us, true) < 0) {
+    const bool manual_sync = (config_.sync_period_us == 0);
+    if (miraculous_motor_csp_init(motors_[i], config_.sync_period_us, manual_sync) < 0) {
       std::fprintf(stderr, "[miraculous_arm] enable_csp: csp_init failed joint %zu\n", i);
       return false;
     }
@@ -172,6 +181,9 @@ void MiraculousArm::disable()
   }
   for (size_t i = 0; i < kArmJoints; ++i) {
     if (motors_[i]) {
+      if (config_.sync_period_us != 0) {
+        miraculous_motor_sync_stop(motors_[i]);
+      }
       miraculous_motor_disable(motors_[i]);
     }
   }
@@ -223,13 +235,6 @@ bool MiraculousArm::get_velocities_rad(std::array<double, kArmJoints> & velociti
   return cache_valid_;
 }
 
-bool MiraculousArm::get_positions_pulse(std::array<int32_t, kArmJoints> & positions) const
-{
-  std::lock_guard<std::mutex> lock(state_mutex_);
-  positions = cached_pos_pulse_;
-  return cache_valid_;
-}
-
 bool MiraculousArm::get_states(std::array<Cia402State_t, kArmJoints> & states) const
 {
   std::lock_guard<std::mutex> lock(state_mutex_);
@@ -254,36 +259,24 @@ bool MiraculousArm::set_targets_rad(const std::array<double, kArmJoints> & targe
   }
   bool ok = true;
   for (size_t i = 0; i < kArmJoints; ++i) {
+    const double motor_target_rad = clamped[i] * config_.joints[i].reduction_ratio;
     if (miraculous_motor_csp_set_target_ex(motors_[i],
-                                            static_cast<float>(clamped[i]),
+                                            static_cast<float>(motor_target_rad),
                                             POS_UNIT_RADIAN) < 0) {
       ok = false;
     }
   }
-  // Unified SYNC so all axes apply their targets on the same edge.
-  // NOTE: if csp_set_target is found to auto-send SYNC internally, set
-  // sync_period_us != 0 (SDK timer) and drop this manual frame. See plan risk #1.
+  // Unified manual SYNC so all axes apply targets on the same edge.
   if (config_.sync_period_us == 0) {
     send_sync();
   }
   return ok;
 }
 
-bool MiraculousArm::set_targets_pulse(const std::array<int32_t, kArmJoints> & targets)
-{
-  // Deprecated: use set_targets_rad() with SDK _ex API for better precision.
-  // This function converts pulses back to radians and calls set_targets_rad().
-  std::array<double, kArmJoints> targets_rad{};
-  for (size_t i = 0; i < kArmJoints; ++i) {
-    targets_rad[i] = pulse_to_rad(targets[i], i);
-  }
-  return set_targets_rad(targets_rad);
-}
-
 void MiraculousArm::send_sync()
 {
-  if (can_ctx_) {
-    miraculous_can_send(can_ctx_, kSyncCanId, nullptr, 0);
+  if (motors_[0]) {
+    miraculous_motor_sync_send(motors_[0]);
   }
 }
 
@@ -341,8 +334,8 @@ void MiraculousArm::read_loop()
   const std::chrono::microseconds period(period_us);
   auto next_wake = clock::now();
 
-  std::array<float, kArmJoints> pos_rad{};
-  std::array<int32_t, kArmJoints> vel_pulse{};
+  std::array<float, kArmJoints> motor_pos_rad{};
+  std::array<float, kArmJoints> joint_vel_rad_s{};
   std::array<Cia402State_t, kArmJoints> states{};
 
   while (read_thread_running_) {
@@ -353,13 +346,13 @@ void MiraculousArm::read_loop()
         continue;
       }
       float p_rad = 0.0f;
-      int32_t v = 0;
+      float v_rad_s = 0.0f;
       Cia402State_t s = CIA_STATE_NOT_READY_TO_SWITCH_ON;
       miraculous_motor_get_position_ex(motors_[i], &p_rad, POS_UNIT_RADIAN);
-      miraculous_motor_get_velocity(motors_[i], &v);
+      miraculous_motor_get_velocity_ex(motors_[i], &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
       miraculous_motor_get_state(motors_[i], &s);
-      pos_rad[i] = p_rad;
-      vel_pulse[i] = v;
+      motor_pos_rad[i] = p_rad;
+      joint_vel_rad_s[i] = v_rad_s;
       states[i] = s;
     }
     // Poll the shared CAN context to dispatch receive/EMCY callbacks.
@@ -370,13 +363,9 @@ void MiraculousArm::read_loop()
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       for (size_t i = 0; i < kArmJoints; ++i) {
-        cached_pos_rad_[i] = static_cast<double>(pos_rad[i]);
-        // Also cache pulse values for compatibility (using pulses_per_radian)
-        cached_pos_pulse_[i] = rad_to_pulse(cached_pos_rad_[i], i);
-        cached_vel_rad_[i] =
-          (config_.joints[i].pulses_per_radian > 0.0)
-            ? static_cast<double>(vel_pulse[i]) / config_.joints[i].pulses_per_radian
-            : 0.0;
+        cached_pos_rad_[i] =
+          static_cast<double>(motor_pos_rad[i]) / config_.joints[i].reduction_ratio;
+        cached_vel_rad_[i] = static_cast<double>(joint_vel_rad_s[i]);
         cached_states_[i] = states[i];
         if (states[i] == CIA_STATE_FAULT ||
           states[i] == CIA_STATE_FAULT_REACTION_ACTIVE)
@@ -418,23 +407,6 @@ void MiraculousArm::can_recv_trampoline(
   if (cb) {
     cb(node_id, error_code, error_reg);
   }
-}
-
-// ============================ unit conversion =============================
-// NOTE: These functions are kept for backward compatibility (e.g., set_targets_pulse).
-// New code should prefer SDK _ex API (csp_set_target_ex, get_position_ex) which
-// handles unit conversion internally with encoder bit-width precision.
-
-int32_t MiraculousArm::rad_to_pulse(double rad, size_t i) const
-{
-  const double ppr = config_.joints[i].pulses_per_radian;
-  return static_cast<int32_t>(std::llround(rad * ppr));
-}
-
-double MiraculousArm::pulse_to_rad(int32_t pulse, size_t i) const
-{
-  const double ppr = config_.joints[i].pulses_per_radian;
-  return (ppr > 0.0) ? static_cast<double>(pulse) / ppr : 0.0;
 }
 
 }  // namespace miraculous_driver

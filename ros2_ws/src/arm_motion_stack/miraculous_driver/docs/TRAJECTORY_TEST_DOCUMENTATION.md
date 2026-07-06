@@ -2,7 +2,7 @@
 
 > 日期: 2026-06-22
 > 组件: `miraculous_driver / trajectory_tracking_test_node`
-> 状态: 构建通过, 待真实 CAN 总线测试
+> 状态: 构建通过, 第一阶段推荐按小幅单轴流程测试
 
 ---
 
@@ -111,19 +111,20 @@ for (i = 0..5) {
 | `can_interface` | string | `can0` | SocketCAN 接口名 |
 | `baudrate` | int | `1000` | CAN 波特率 (kbps) |
 | `node_ids` | string | `1,2,3,4,5,6` | 6 个节点 ID |
-| `pulses_per_radian` | string | `1000.0,...` | 每 joint 脉冲/弧度 (**需替换真实值**) |
-| `pulses_per_radian_single` | string | `0.0` | 单值广播模式 |
+| `reduction_ratio` | string | `100.0,...` | 电机侧/关节侧减速比, 可填单值或 6 个逗号分隔值 |
+| `position_min` | string | `0.0,...` | 6 轴软件下限 [rad], `max <= min` 时该轴不 clamp |
+| `position_max` | string | `0.0,...` | 6 轴软件上限 [rad], `max <= min` 时该轴不 clamp |
 
 ### 4.2 轨迹参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `amplitude` | double | `0.5` | 正弦/余弦幅值 [rad] (~28.6°) |
-| `period` | double | `5.0` | 一个完整周期 [s] |
+| `amplitude` | double | `0.03` | 正弦/余弦幅值 [rad], 第一阶段保守默认值 |
+| `period` | double | `6.0` | 一个完整周期 [s] |
 | `frequency` | double | `100.0` | 命令下发频率 [Hz] |
 | `waveform` | string | `sin` | 波形类型: `sin` 或 `cos` |
 | `test_joint` | int | `0` | 测试关节索引: 0=J1, 1=J2, ..., 5=J6 |
-| `duration` | double | `0.0` | 自动停止时间 [s] (0=手动) |
+| `duration` | double | `3.0` | 自动停止时间 [s] (0=手动) |
 | `settle_time` | double | `0.5` | 使能后等待稳定时间 [s] |
 
 ### 4.3 输出参数
@@ -140,7 +141,7 @@ for (i = 0..5) {
 ### 5.1 构建
 
 ```bash
-cd /home/alienware/Desktop/PersonalProject/ros2_ws
+cd /home/alienware/Documents/PersonalProject/ros2_ws
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-select miraculous_driver \
@@ -152,14 +153,33 @@ colcon build --symlink-install --packages-select miraculous_driver \
 ```bash
 source install/setup.bash
 
-# 默认参数启动 (J1, sin, 0.5rad幅值, 5s周期, 100Hz)
-ros2 launch miraculous_driver trajectory_test.launch.py \
-  pulses_per_radian:="1000.0,1000.0,1000.0,1000.0,1000.0,1000.0"
+export ARM_REDUCTION_RATIO="REAL_J1,REAL_J2,REAL_J3,REAL_J4,REAL_J5,REAL_J6"
+export ARM_LIMIT_MIN="MIN_J1,MIN_J2,MIN_J3,MIN_J4,MIN_J5,MIN_J6"
+export ARM_LIMIT_MAX="MAX_J1,MAX_J2,MAX_J3,MAX_J4,MAX_J5,MAX_J6"
 
-# 自定义参数 (例如测 J3, 0.3rad幅值, 2s周期)
-ros2 launch miraculous_driver trajectory_test.launch.py \
-  test_joint:=2 amplitude:=0.3 period:=2.0 waveform:=sin \
-  pulses_per_radian:="1000.0,1000.0,1000.0,1000.0,1000.0,1000.0"
+# 第一阶段推荐: J1, sin, 0.03 rad, 3 秒自动停止, 100 Hz
+ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
+  can_interface:=can0 \
+  baudrate:=1000 \
+  reduction_ratio:="$ARM_REDUCTION_RATIO" \
+  position_min:="$ARM_LIMIT_MIN" \
+  position_max:="$ARM_LIMIT_MAX" \
+  test_joint:=0 \
+  amplitude:=0.03 \
+  period:=6.0 \
+  duration:=3.0
+
+# J1 通过后再逐轴测试, 例如 J3:
+ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
+  can_interface:=can0 \
+  baudrate:=1000 \
+  reduction_ratio:="$ARM_REDUCTION_RATIO" \
+  position_min:="$ARM_LIMIT_MIN" \
+  position_max:="$ARM_LIMIT_MAX" \
+  test_joint:=2 \
+  amplitude:=0.03 \
+  period:=6.0 \
+  duration:=3.0
 ```
 
 ### 5.3 开始测试
@@ -181,8 +201,8 @@ ros2 service call /trajectory_test/start std_srvs/srv/Trigger
 # 手动停止:
 ros2 service call /trajectory_test/stop std_srvs/srv/Trigger
 
-# 或设置自动停止 (5s = 一个周期):
-ros2 launch miraculous_driver trajectory_test.launch.py duration:=5.0 ...
+# 或设置自动停止:
+ros2 launch miraculous_driver trajectory_test.launch.py duration:=3.0 ...
 ```
 
 停止后节点会:
@@ -257,45 +277,46 @@ conda install numpy matplotlib
 ### 6.1 单关节基础验证
 
 ```bash
-# J1 正弦, 0.5rad幅值, 5s周期
+# J1 正弦, 0.03rad幅值, 3s自动停止
 ros2 launch miraculous_driver trajectory_test.launch.py \
-  test_joint:=0 amplitude:=0.5 period:=5.0 waveform:=sin duration:=5.0
+  reduction_ratio:="$ARM_REDUCTION_RATIO" position_min:="$ARM_LIMIT_MIN" position_max:="$ARM_LIMIT_MAX" \
+  test_joint:=0 amplitude:=0.03 period:=6.0 waveform:=sin duration:=3.0
 ```
 
 ### 6.2 不同幅值对比 (测试线性度)
 
+先确认 `0.03rad` 小幅值稳定、无 EMCY、无异常跳变，再逐步放大。
+
 ```bash
-# 小幅值 (0.1rad ≈ 5.7°)
-... amplitude:=0.1 period:=5.0
+# 第一阶段小幅值
+... amplitude:=0.03 period:=6.0 duration:=3.0
 
-# 中幅值 (0.5rad ≈ 28.6°)
-... amplitude:=0.5 period:=5.0
+# 小幅值进阶
+... amplitude:=0.1 period:=6.0 duration:=6.0
 
-# 大幅值 (1.0rad ≈ 57.3°)
-... amplitude:=1.0 period:=5.0
+# 中幅值必须在确认限位、负载和急停流程后再做
+... amplitude:=0.3 period:=6.0 duration:=6.0
+
+# 大幅值测试不属于第一阶段 bring-up
 ```
 
 ### 6.3 不同频率对比 (测试带宽)
 
 ```bash
-# 慢轨迹 (0.2Hz, 5s周期)
-... period:=5.0
+# 慢轨迹
+... amplitude:=0.03 period:=6.0
 
-# 中速 (0.5Hz, 2s周期)
-... period:=2.0
+# 中速, 先保持小幅值
+... amplitude:=0.03 period:=3.0
 
-# 快速 (1Hz, 1s周期)
-... period:=1.0
-
-# 极快 (2Hz, 0.5s周期) — 测试伺服带宽极限
-... period:=0.5
+# 更快频率放到单轴低风险验证通过后
 ```
 
 ### 6.4 cos 波形测试
 
 ```bash
 # cos 有非零初值, 测试阶跃响应 + 持续跟踪
-... waveform:=cos amplitude:=0.5 period:=5.0
+... waveform:=cos amplitude:=0.03 period:=6.0 duration:=3.0
 ```
 
 ### 6.5 不同关节对比
@@ -354,9 +375,17 @@ timestamp,command_rad,actual_rad,error_rad
 colcon build --symlink-install --packages-select miraculous_driver \
   --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
 
-# === 启动 (默认 J1 sin 0.5rad 5s) ===
-ros2 launch miraculous_driver trajectory_test.launch.py \
-  pulses_per_radian:="YOUR_VALUES"
+# === 参数 ===
+export ARM_REDUCTION_RATIO="REAL_J1,REAL_J2,REAL_J3,REAL_J4,REAL_J5,REAL_J6"
+export ARM_LIMIT_MIN="MIN_J1,MIN_J2,MIN_J3,MIN_J4,MIN_J5,MIN_J6"
+export ARM_LIMIT_MAX="MAX_J1,MAX_J2,MAX_J3,MAX_J4,MAX_J5,MAX_J6"
+
+# === 启动 J1 小幅跟随测试 ===
+ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
+  can_interface:=can0 baudrate:=1000 \
+  reduction_ratio:="$ARM_REDUCTION_RATIO" \
+  position_min:="$ARM_LIMIT_MIN" position_max:="$ARM_LIMIT_MAX" \
+  test_joint:=0 amplitude:=0.03 period:=6.0 duration:=3.0
 
 # === 开始 ===
 ros2 service call /trajectory_test/start std_srvs/srv/Trigger
@@ -369,6 +398,6 @@ python3 $(ros2 pkg prefix miraculous_driver)/lib/miraculous_driver/plot_trajecto
   ~/tracking_test_*.csv
 
 # === 自动 5s 测试 ===
-ros2 launch miraculous_driver trajectory_test.launch.py duration:=5.0 \
-  pulses_per_radian:="YOUR_VALUES"
+ros2 launch miraculous_driver trajectory_test.launch.py duration:=3.0 \
+  reduction_ratio:="YOUR_VALUES"
 ```

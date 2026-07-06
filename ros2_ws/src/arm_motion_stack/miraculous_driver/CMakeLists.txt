@@ -2,17 +2,15 @@ cmake_minimum_required(VERSION 3.10)
 project(miraculous_driver)
 
 # ---- miraculous_sdk (CANopen/CiA402 motor C SDK) ----
-# The SDK lives outside the ROS workspace at <project_root>/miraculous_sdk.
+# The current checked-in SDK lives outside the ROS workspace at
+# <project_root>/miraculous_sdk_x86_64_linux_gnu_20260702.
 # From ros2_ws/src/arm_motion_stack/miraculous_driver that is 4 levels up.
-#
-# Two SDK variants may exist side-by-side:
-#   miraculous_sdk          – ARM aarch64 (target device)
-#   miraculous_sdk_x86_64    – x86-64 (development host)
-# We auto-select based on the host architecture so the package builds on both.
+# For other architectures or SDK snapshots, pass:
+#   -DMIRACULOUS_SDK_DIR=/abs/path/to/sdk
 if(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "amd64")
-  set(_SDK_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../miraculous_sdk_x86_64")
+  set(_SDK_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../miraculous_sdk_x86_64_linux_gnu_20260702")
 else()
-  set(_SDK_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../miraculous_sdk")
+  set(_SDK_DEFAULT "")
 endif()
 
 set(MIRACULOUS_SDK_DIR
@@ -22,12 +20,13 @@ set(MIRACULOUS_SDK_DIR
 if(NOT EXISTS "${MIRACULOUS_SDK_DIR}/include/miraculous_sdk.h")
   message(FATAL_ERROR
     "miraculous_sdk header not found at '${MIRACULOUS_SDK_DIR}/include/miraculous_sdk.h'. "
-    "Set -DMIRACULOUS_SDK_DIR=/abs/path/to/miraculous_sdk")
+    "Set -DMIRACULOUS_SDK_DIR=/abs/path/to/sdk")
 endif()
 
 find_library(MIRACULOUS_SDK_LIB
   NAMES miraculous_sdk
   PATHS "${MIRACULOUS_SDK_DIR}/lib"
+  NO_DEFAULT_PATH
   REQUIRED)
 message(STATUS "miraculous_sdk: include=${MIRACULOUS_SDK_DIR}/include lib=${MIRACULOUS_SDK_LIB}")
 
@@ -114,7 +113,7 @@ install(
 install(FILES "${MIRACULOUS_SDK_DIR}/lib/libmiraculous_sdk.so" DESTINATION lib)
 
 install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config docs launch DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS scripts/plot_trajectory.py DESTINATION lib/${PROJECT_NAME})
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)

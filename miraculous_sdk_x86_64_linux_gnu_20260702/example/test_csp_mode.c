@@ -27,10 +27,13 @@
 #define BATCH_COUNT         4
 
 /* 每步的步进脉冲数 */
-#define STEP_SIZE           600
+#define STEP_SIZE           (524288*4/10/360)
 
 /* 每次下发后等待电机到位的时间 (us) */
 #define SETTLE_TIME_US     10000 /* 10 ms */
+
+/* 速度判零阈值 (脉冲/s) */
+#define VELOCITY_ZERO_THRESHOLD  10
 
 static volatile bool g_quit = false;
 
@@ -38,6 +41,22 @@ static void signal_handler(int sig)
 {
     (void)sig;
     g_quit = true;
+}
+
+/* 等待电机速度降至零 */
+static void wait_velocity_zero(MiraMotor *motor, int timeout_ms)
+{
+    int32_t vel;
+    for (int i = 0; i < timeout_ms / 10; i++) {
+        if (g_quit) break;
+        miraculous_motor_sync_send(motor);  /* 每次检查前发 SYNC 获取最新 TPDO */
+        usleep(3000);
+        if (miraculous_motor_get_velocity(motor, &vel) == 0) {
+            if (vel < 0) vel = -vel;
+            if (vel <= VELOCITY_ZERO_THRESHOLD) return;
+        }
+        usleep(7000);
+    }
 }
 
 int main(int argc, char **argv)
@@ -58,22 +77,40 @@ int main(int argc, char **argv)
 
     /* 设模式 → 使能 → init */
     if (miraculous_motor_set_mode(motor, CIA_MODE_CSP) < 0) goto cleanup;
-    if (miraculous_motor_full_enable(motor) < 0) goto cleanup;
+    if (miraculous_motor_full_enable(motor) < 0) {
+        uint16_t sw = 0;
+        uint16_t err = 0;
+        uint8_t len = 2;
+        miraculous_motor_get_statusword(motor, &sw);
+        fprintf(stderr, "full_enable failed, statusword=0x%04X", sw);
+        if (miraculous_motor_sdo_read(motor, CIA402_OD_ERROR_CODE, 0, &err, &len) == 0)
+            fprintf(stderr, " error_code=0x%04X", err);
+        fprintf(stderr, "\n");
+        goto cleanup;
+    }
+
     uint32_t sync_period_us = SETTLE_TIME_US;
     if (miraculous_motor_csp_init(motor, sync_period_us, manual_sync) < 0) {
         fprintf(stderr, "CSP init failed\n");
-        goto cleanup;
+        goto shutdown;
     }
 
     printf("CSP mode — SYNC: %s\n", manual_sync ? "MANUAL" : "TIMER 5000 us");
     printf("Settle time = %d us (%d ms)\n", SETTLE_TIME_US, SETTLE_TIME_US / 1000);
     printf("Position tolerance = ±%d inc\n\n", POSITION_TOLERANCE);
 
-    /* --- 读取初始位置 --- */
+    /* --- 发送 SYNC 触发 TPDO, 然后读取初始位置 --- */
+    miraculous_motor_sync_send(motor);
+    usleep(1000);
     int32_t start_pos;
     if (miraculous_motor_get_position(motor, &start_pos) < 0) {
-        fprintf(stderr, "Failed to read start position\n");
-        goto cleanup;
+        /* TPDO 未到, 用 SDO 读一次 */
+        uint8_t len = 4;
+        if (miraculous_motor_sdo_read(motor, CIA402_OD_ACTUAL_POSITION, 0,
+                                       &start_pos, &len) < 0) {
+            fprintf(stderr, "Failed to read start position\n");
+            goto shutdown;
+        }
     }
     printf("Start position: 0x%08X (%d)\n\n", start_pos, start_pos);
 
@@ -89,7 +126,8 @@ int main(int argc, char **argv)
     int failed = 0;
     int move_no = 0;
     int32_t direction = 1;           /* 1: 正向, -1: 反向 */
-    int32_t pos;
+    int32_t pos = 0;
+    int32_t batch_base = 0;
 
     for (int batch = 0; batch < BATCH_COUNT; batch++) {
         if (g_quit) break;
@@ -97,10 +135,17 @@ int main(int argc, char **argv)
         printf("--- Batch %d (%s step) ---\n",
                batch + 1, (direction > 0) ? "正向" : "反向");
 
-        /* 批次开始：读取当前位置作为基准，后续每步累加 */
+        /* 换向时等待速度降为零，再发下一批目标 */
+        if (batch > 0) {
+            wait_velocity_zero(motor, 20000);
+        }
+
+        /* 批次开始：读取当前位置作为基准 */
         usleep(200);
-        miraculous_motor_get_position(motor, &pos);
-        int32_t batch_base = pos;
+        if (miraculous_motor_get_position(motor, &pos) < 0) {
+            pos = batch_base;  /* TPDO 未到，用上一批的基准 */
+        }
+        batch_base = pos;
 
         for (int m = 0; m < MOVES_PER_BATCH; m++) {
             if (g_quit) break;
@@ -117,17 +162,28 @@ int main(int argc, char **argv)
                 continue;
             }
 
+            /* 发送 SYNC 帧, 通知从站锁存目标位置 */
+            miraculous_motor_sync_send(motor);
+
             usleep(SETTLE_TIME_US);
 
-            /* 读取实际位置 (TPDO 缓存已在 poll 中更新) */
+            /* 读取实际位置 (本次 SYNC 读取的是上一目标到位后的位置) */
             if (miraculous_motor_get_position(motor, &pos) < 0) {
                 fprintf(stderr, "Failed to read position after move #%d\n", move_no);
                 failed++;
                 continue;
             }
 
-            /* 计算差值 */
-            int32_t delta = target - pos;
+            /* 第一次不比较, 保存位置后继续 */
+            if (move_no == 1) {
+                printf(" %3d | 0x%08X | 0x%08X |   ----    | SKIP\n",
+                       move_no, target, pos);
+                continue;
+            }
+
+            /* 计算差值: 用本次读到的位置与上一个目标比较 */
+            int32_t prev_target = batch_base + direction * STEP_SIZE * (m);  /* 上一个目标 */
+            int32_t delta = prev_target - pos;
             int32_t total_move = STEP_SIZE;
 
             const char *status;
@@ -143,6 +199,19 @@ int main(int argc, char **argv)
                    move_no, target, pos, delta,
                    (total_move > 0) ? (int)((double)abs(delta) / total_move * 100) : 0,
                    status);
+        }
+
+        /* 批次结束，发 SYNC 获取最终位置并与最后目标比较 */
+        int32_t last_target = batch_base + direction * STEP_SIZE * MOVES_PER_BATCH;
+        sleep(3);
+        miraculous_motor_sync_send(motor);
+        int32_t final_pos;
+        if (miraculous_motor_get_position(motor, &final_pos) == 0) {
+            int32_t delta = last_target - final_pos;
+            if (delta < 0) delta = -delta;
+            printf("  Batch %d final: 0x%08X (%d), target: 0x%08X (%d), delta: %d\n",
+                   batch + 1, final_pos, final_pos,
+                   last_target, last_target, delta);
         }
 
         /* 每组完成后方向取反 */
@@ -169,6 +238,7 @@ int main(int argc, char **argv)
         printf("  See example_read_params for current PI values.\n");
     }
 
+shutdown:
     miraculous_motor_shutdown(motor);
 
 cleanup:

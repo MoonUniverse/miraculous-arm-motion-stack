@@ -6,7 +6,7 @@ This repository contains the existing ARM URDF export and the new ROS 2 motion s
 
 - `arm_description/`: original SolidWorks-to-URDF export as received.
 - `ros2_ws/src/arm_motion_stack/`: ROS 2 + MoveIt 2 + ros2_control + Isaac Sim-ready project generated from the existing URDF.
-- `miraculous_sdk/`: existing SDK files in the workspace.
+- `miraculous_sdk_x86_64_linux_gnu_20260702/`: current Miraculous motor SDK snapshot used by the ROS 2 driver on x86-64.
 - `CHANGELOG.md`: durable record of repository setup and major project changes.
 
 ## Current ROS 2 Stack

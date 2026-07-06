@@ -1,5 +1,5 @@
 asset_path: /tmp/arm_isaac_abs.urdf
-usd_dir: /home/alienware/Desktop/PersonalProject/ros2_ws/src/arm_motion_stack/arm_description/usd
+usd_dir: /home/alienware/Documents/PersonalProject/ros2_ws/src/arm_motion_stack/arm_description/usd
 usd_file_name: arm_isaac.usd
 force_usd_conversion: true
 make_instanceable: true

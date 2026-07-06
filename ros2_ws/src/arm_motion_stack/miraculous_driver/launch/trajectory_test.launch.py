@@ -11,8 +11,11 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     joint_states_topic = LaunchConfiguration("joint_states_topic")
     can_interface = LaunchConfiguration("can_interface")
+    baudrate = LaunchConfiguration("baudrate")
     node_ids = LaunchConfiguration("node_ids")
-    pulses_per_radian = LaunchConfiguration("pulses_per_radian")
+    reduction_ratio = LaunchConfiguration("reduction_ratio")
+    position_min = LaunchConfiguration("position_min")
+    position_max = LaunchConfiguration("position_max")
     amplitude = LaunchConfiguration("amplitude")
     period = LaunchConfiguration("period")
     frequency = LaunchConfiguration("frequency")
@@ -39,8 +42,11 @@ def generate_launch_description():
         output="screen",
         parameters=[{
             "can_interface": can_interface,
+            "baudrate": baudrate,
             "node_ids": node_ids,
-            "pulses_per_radian": pulses_per_radian,
+            "reduction_ratio": reduction_ratio,
+            "position_min": position_min,
+            "position_max": position_max,
             "joint_states_topic": joint_states_topic,
             "amplitude": amplitude,
             "period": period,
@@ -56,14 +62,17 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
         DeclareLaunchArgument("can_interface", default_value="can0"),
+        DeclareLaunchArgument("baudrate", default_value="1000"),
         DeclareLaunchArgument("node_ids", default_value="1,2,3,4,5,6"),
         DeclareLaunchArgument(
-            "pulses_per_radian",
-            default_value="1000.0,1000.0,1000.0,1000.0,1000.0,1000.0",
-            description="TODO: replace with real per-joint pulses_per_radian"),
-        DeclareLaunchArgument("amplitude", default_value="0.5",
+            "reduction_ratio",
+            default_value="100.0,100.0,100.0,100.0,100.0,100.0",
+            description="Motor-to-joint reduction ratio. ROS uses joint-side radians; SDK position APIs use motor-side radians."),
+        DeclareLaunchArgument("position_min", default_value="0.0,0.0,0.0,0.0,0.0,0.0"),
+        DeclareLaunchArgument("position_max", default_value="0.0,0.0,0.0,0.0,0.0,0.0"),
+        DeclareLaunchArgument("amplitude", default_value="0.03",
                               description="Sine/cosine amplitude [rad]"),
-        DeclareLaunchArgument("period", default_value="5.0",
+        DeclareLaunchArgument("period", default_value="6.0",
                               description="Sine/cosine period [s]"),
         DeclareLaunchArgument("frequency", default_value="100.0",
                               description="Command update rate [Hz]"),
@@ -71,7 +80,7 @@ def generate_launch_description():
                               description="Waveform: 'sin' or 'cos'"),
         DeclareLaunchArgument("test_joint", default_value="0",
                               description="Joint index 0=J1..5=J6"),
-        DeclareLaunchArgument("duration", default_value="0.0",
+        DeclareLaunchArgument("duration", default_value="3.0",
                               description="Auto-stop after N seconds (0=manual)"),
         DeclareLaunchArgument("output_file", default_value="",
                               description="CSV output path (empty=auto timestamp)"),

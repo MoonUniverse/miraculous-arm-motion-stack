@@ -11,8 +11,9 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     joint_states_topic = LaunchConfiguration("joint_states_topic")
     can_interface = LaunchConfiguration("can_interface")
+    baudrate = LaunchConfiguration("baudrate")
     node_ids = LaunchConfiguration("node_ids")
-    pulses_per_radian = LaunchConfiguration("pulses_per_radian")
+    reduction_ratio = LaunchConfiguration("reduction_ratio")
     record_rate = LaunchConfiguration("record_rate")
     auto_record = LaunchConfiguration("auto_record")
 
@@ -33,8 +34,9 @@ def generate_launch_description():
         output="screen",
         parameters=[{
             "can_interface": can_interface,
+            "baudrate": baudrate,
             "node_ids": node_ids,
-            "pulses_per_radian": pulses_per_radian,
+            "reduction_ratio": reduction_ratio,
             "joint_states_topic": joint_states_topic,
             "record_rate": record_rate,
             "auto_record": auto_record,
@@ -44,11 +46,12 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
         DeclareLaunchArgument("can_interface", default_value="can0"),
+        DeclareLaunchArgument("baudrate", default_value="1000"),
         DeclareLaunchArgument("node_ids", default_value="1,2,3,4,5,6"),
         DeclareLaunchArgument(
-            "pulses_per_radian",
-            default_value="1000.0,1000.0,1000.0,1000.0,1000.0,1000.0",
-            description="TODO: replace with real per-joint pulses_per_radian"),
+            "reduction_ratio",
+            default_value="100.0,100.0,100.0,100.0,100.0,100.0",
+            description="TODO: replace with real per-joint reduction_ratio"),
         DeclareLaunchArgument("record_rate", default_value="50.0"),
         DeclareLaunchArgument("auto_record", default_value="false"),
         Node(

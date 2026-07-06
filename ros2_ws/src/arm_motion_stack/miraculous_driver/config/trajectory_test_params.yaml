@@ -3,24 +3,26 @@
 # This file documents all parameters consumed by the trajectory_tracking_test_node.
 # Values can be overridden via launch arguments or command-line parameters.
 #
-# CRITICAL: pulses_per_radian must be filled with the real per-joint values:
-#   pulses_per_radian = counts_per_rev * gear_ratio / (2*pi)
+# ROS commands/states are joint-side radians. The SDK position APIs use
+# motor-side radians, so reduction_ratio converts joint <-> motor angle.
 trajectory_test:
   ros__parameters:
     # ---- motor / CAN ----
     can_interface: "can0"
     baudrate: 1000
     node_ids: "1,2,3,4,5,6"
-    # TODO: replace with real per-joint pulses_per_radian (6 comma-separated values).
-    pulses_per_radian: "1000.0,1000.0,1000.0,1000.0,1000.0,1000.0"
+    reduction_ratio: "100.0,100.0,100.0,100.0,100.0,100.0"
+    # 0/0 disables clamping for that joint. Replace with measured safe limits before motion tests.
+    position_min: "0.0,0.0,0.0,0.0,0.0,0.0"
+    position_max: "0.0,0.0,0.0,0.0,0.0,0.0"
 
     # ---- trajectory ----
-    amplitude: 0.5          # [rad] sine/cosine amplitude
-    period: 5.0             # [s]   one full cycle
+    amplitude: 0.03         # [rad] conservative first-bringup amplitude
+    period: 6.0             # [s]   one full cycle
     frequency: 100.0        # [Hz]  command update rate
     waveform: "sin"         # "sin" or "cos"
     test_joint: 0           # 0=J1, 1=J2, ..., 5=J6
-    duration: 0.0           # [s] auto-stop (0 = manual via service)
+    duration: 3.0           # [s] auto-stop (0 = manual via service)
     settle_time: 0.5        # [s] wait before starting trajectory
 
     # ---- output ----

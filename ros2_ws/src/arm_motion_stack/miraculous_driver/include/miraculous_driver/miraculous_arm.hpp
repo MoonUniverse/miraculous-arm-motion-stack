@@ -17,14 +17,14 @@ namespace miraculous_driver
 /// Number of joints on the ARM 6DOF manipulator (J1..J6).
 constexpr size_t kArmJoints = 6;
 
-/// Per-joint configuration: CANopen node id and radian<->pulse conversion.
+/// Per-joint configuration: CANopen node id and joint<->motor angle conversion.
 struct JointConfig
 {
   std::string name;            ///< joint name, e.g. "J1"
   uint8_t node_id = 0;         ///< CANopen node id (1..127)
-  /// Pulses per radian at the joint output. rad = pulse / pulses_per_radian.
-  /// May be derived as counts_per_rev * gear_ratio / (2*pi).
-  double pulses_per_radian = 0.0;
+  /// Motor revolutions per joint/load revolution. ROS uses joint-side radians;
+  /// the SDK _ex position APIs use motor-side radians.
+  double reduction_ratio = 100.0;
   double position_min = 0.0;   ///< joint lower limit [rad]
   double position_max = 0.0;   ///< joint upper limit [rad]
 };
@@ -51,7 +51,7 @@ using EmcyCallback =
  *
  * Responsibilities:
  *  - open / bootstrap / enable / disable the 6 motors
- *  - radian <-> pulse conversion
+ *  - joint-side radian <-> motor-side radian conversion
  *  - background thread polling actual position/velocity/state into a mutex cache
  *  - CSP write of 6 target positions with a unified SYNC broadcast
  *  - joint limit clamping and EMCY detection
@@ -108,19 +108,16 @@ public:
 
   bool get_positions_rad(std::array<double, kArmJoints> & positions) const;
   bool get_velocities_rad(std::array<double, kArmJoints> & velocities) const;
-  bool get_positions_pulse(std::array<int32_t, kArmJoints> & positions) const;
   bool get_states(std::array<Cia402State_t, kArmJoints> & states) const;
   bool has_fault() const;
 
   // ---- CSP writing ---------------------------------------------------------
 
-  /// Set 6 target positions [rad], convert to pulses, write csp_set_target for
-  /// each motor, then send one unified SYNC frame. Targets are clamped to limits.
+  /// Set 6 joint-side target positions [rad], convert to motor-side radians,
+  /// write csp_set_target_ex for each motor, then send one unified SYNC frame in
+  /// manual SYNC mode. Targets are clamped to joint-side limits.
   /// @return true if all writes succeeded.
   bool set_targets_rad(const std::array<double, kArmJoints> & targets);
-
-  /// Set 6 target positions directly in pulses and send one unified SYNC frame.
-  bool set_targets_pulse(const std::array<int32_t, kArmJoints> & targets);
 
   /// Send a single SYNC frame (CAN id 0x80, len 0) on the shared CAN context.
   void send_sync();
@@ -143,9 +140,6 @@ private:
   static void can_recv_trampoline(
     uint32_t can_id, const uint8_t * data, uint8_t len, void * user_data);
 
-  inline int32_t rad_to_pulse(double rad, size_t i) const;
-  inline double pulse_to_rad(int32_t pulse, size_t i) const;
-
   ArmConfig config_;
   std::array<MiraMotor *, kArmJoints> motors_{};
   MiraCanCtx * can_ctx_{nullptr};
@@ -157,7 +151,6 @@ private:
   mutable std::mutex state_mutex_;
   std::array<double, kArmJoints> cached_pos_rad_{};
   std::array<double, kArmJoints> cached_vel_rad_{};
-  std::array<int32_t, kArmJoints> cached_pos_pulse_{};
   std::array<Cia402State_t, kArmJoints> cached_states_{};
   bool cache_valid_{false};
   bool fault_detected_{false};

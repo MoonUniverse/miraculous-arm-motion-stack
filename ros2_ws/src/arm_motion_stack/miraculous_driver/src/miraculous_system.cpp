@@ -16,6 +16,14 @@ namespace miraculous_driver
 namespace
 {
 constexpr double kSeedWaitSec = 0.25;  // wait for the read thread cache on configure
+
+bool expand_single_value(std::vector<double> & values, size_t size)
+{
+  if (values.size() == 1 && size > 1) {
+    values.assign(size, values[0]);
+  }
+  return values.size() == size;
+}
 }
 
 hardware_interface::CallbackReturn MiraculousSystem::on_init(
@@ -96,12 +104,28 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
   const std::vector<int> node_ids =
     parse_int_list_param("node_ids", default_node_ids);
 
-  // pulses_per_radian may be given as a single value (same for all joints) or a
-  // comma-separated list of 6 values.
-  std::vector<double> ppr = parse_double_list_param("pulses_per_radian", {0.0});
-  if (ppr.size() == 1 && joint_names_.size() > 1) {
-    const double single = ppr[0];
-    ppr.assign(joint_names_.size(), single);
+  std::vector<double> reduction_ratio =
+    parse_double_list_param("reduction_ratio", {100.0});
+  if (!expand_single_value(reduction_ratio, joint_names_.size())) {
+    RCLCPP_FATAL(
+      rclcpp::get_logger("MiraculousSystem"),
+      "reduction_ratio must contain either 1 or %zu comma-separated values.",
+      joint_names_.size());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  std::vector<double> position_min =
+    parse_double_list_param("position_min", std::vector<double>(joint_names_.size(), 0.0));
+  std::vector<double> position_max =
+    parse_double_list_param("position_max", std::vector<double>(joint_names_.size(), 0.0));
+  if (!expand_single_value(position_min, joint_names_.size()) ||
+    !expand_single_value(position_max, joint_names_.size()))
+  {
+    RCLCPP_FATAL(
+      rclcpp::get_logger("MiraculousSystem"),
+      "position_min and position_max must each contain either 1 or %zu comma-separated values.",
+      joint_names_.size());
+    return hardware_interface::CallbackReturn::ERROR;
   }
 
   if (node_ids.size() != joint_names_.size()) {
@@ -111,29 +135,19 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
       node_ids.size(), joint_names_.size());
     return hardware_interface::CallbackReturn::ERROR;
   }
-  if (ppr.size() != joint_names_.size()) {
-    RCLCPP_FATAL(
-      rclcpp::get_logger("MiraculousSystem"),
-      "pulses_per_radian count (%zu) does not match joint count (%zu).",
-      ppr.size(), joint_names_.size());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
   for (size_t i = 0; i < joint_names_.size(); ++i) {
     JointConfig jc;
     jc.name = joint_names_[i];
     jc.node_id = static_cast<uint8_t>(node_ids[i]);
-    jc.pulses_per_radian = ppr[i];
-    // Joint limits from the URDF <limit> tag are not exposed on ComponentInfo
-    // in ROS 2 Humble. Leave at 0.0 (= no clamping) until configured elsewhere.
-    jc.position_min = 0.0;
-    jc.position_max = 0.0;
-    if (jc.pulses_per_radian <= 0.0) {
+    jc.reduction_ratio = reduction_ratio[i];
+    jc.position_min = position_min[i];
+    jc.position_max = position_max[i];
+    if (jc.reduction_ratio <= 0.0) {
       RCLCPP_FATAL(
         rclcpp::get_logger("MiraculousSystem"),
-        "Joint '%s' has invalid pulses_per_radian=%g. Set the 'pulses_per_radian' "
+        "Joint '%s' has invalid reduction_ratio=%g. Set the 'reduction_ratio' "
         "hardware parameter (single value or comma-separated list of %zu).",
-        jc.name.c_str(), jc.pulses_per_radian, joint_names_.size());
+        jc.name.c_str(), jc.reduction_ratio, joint_names_.size());
       return hardware_interface::CallbackReturn::ERROR;
     }
     config.joints.push_back(jc);
@@ -177,9 +191,10 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
 
   RCLCPP_INFO(
     rclcpp::get_logger("MiraculousSystem"),
-    "Configured: can=%s joints=%zu sync_period_us=%u read_rate_hz=%.1f",
+    "Configured: can=%s joints=%zu sync_period_us=%u read_rate_hz=%.1f reduction_ratio[0]=%.3f",
     config.can_interface.c_str(), joint_names_.size(),
-    config.sync_period_us, config.read_rate_hz);
+    config.sync_period_us, config.read_rate_hz,
+    config.joints.empty() ? 0.0 : config.joints.front().reduction_ratio);
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
