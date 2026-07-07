@@ -139,6 +139,7 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
   config.baudrate = static_cast<CiaBaudrate_t>(parse_int_param("baudrate", 1000));
   config.sync_period_us = static_cast<uint32_t>(parse_int_param("sync_period_us", 0));
   config.read_rate_hz = parse_double_param("read_rate_hz", 100.0);
+  config.state_poll_rate_hz = parse_double_param("state_poll_rate_hz", 0.0);
 
   const std::vector<int> default_node_ids = {1, 2, 3, 4, 5, 6};
   const std::vector<int> node_ids =
@@ -224,9 +225,10 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
 
   RCLCPP_INFO(
     rclcpp::get_logger("MiraculousSystem"),
-    "Configured: can=%s active_joints=%zu total_joints=%zu sync_period_us=%u read_rate_hz=%.1f",
+    "Configured: can=%s active_joints=%zu total_joints=%zu sync_period_us=%u "
+    "read_rate_hz=%.1f state_poll_rate_hz=%.1f",
     config.can_interface.c_str(), config.joints.size(), joint_names_.size(),
-    config.sync_period_us, config.read_rate_hz);
+    config.sync_period_us, config.read_rate_hz, config.state_poll_rate_hz);
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }

@@ -158,6 +158,7 @@ miraculous_motor_sync_send(motor[0]);  // 统一 SYNC
 
 - `sync_period_us == 0` 时使用手动 SYNC，wrapper 在 6 个目标全部写入后调用 SDK 的 `miraculous_motor_sync_send()`
 - `sync_period_us != 0` 时交给 SDK 定时 SYNC 管理，`disable()` 时调用 `miraculous_motor_sync_stop()`
+- 状态字 `0x6041` 通过 SDO 读取，默认不在读线程轮询；需要诊断状态机时再设置 `state_poll_rate_hz > 0`
 
 ### 3.4 单位语义
 
@@ -229,9 +230,10 @@ struct JointConfig {
 struct ArmConfig {
     std::string can_interface = "can0";
     CiaBaudrate_t baudrate = CIA_BAUDRATE_1000;
-    std::vector<JointConfig> joints;  // 必须有 6 个
+    std::vector<JointConfig> joints;  // 已安装关节, 1..6 个
     uint32_t sync_period_us = 0;     // 0 = 手动 SYNC
     double read_rate_hz = 100.0;
+    double state_poll_rate_hz = 0.0; // 0 = 不轮询 0x6041 状态字
 };
 
 class MiraculousArm {
@@ -303,6 +305,7 @@ class MiraculousArm {
 | `position_max` | `0.0,...` | 软件上限 [rad], 可填 1 个、已装关节数量 N 个、或 6 个全量值 |
 | `sync_period_us` | `0` | 0=手动 SYNC, 非 0=SDK 定时器 |
 | `read_rate_hz` | `100.0` | 后台读取线程频率 |
+| `state_poll_rate_hz` | `0.0` | 状态字 SDO 轮询频率，0=关闭；轨迹跟踪默认关闭 |
 
 ### 5.2 teach_record_node 参数
 

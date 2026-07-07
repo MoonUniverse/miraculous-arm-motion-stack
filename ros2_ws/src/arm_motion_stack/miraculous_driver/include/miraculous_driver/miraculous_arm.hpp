@@ -37,6 +37,7 @@ struct ArmConfig
   /// per write cycle after setting all targets). Non-zero = SDK internal SYNC timer.
   uint32_t sync_period_us = 0;
   double read_rate_hz = 100.0;                ///< background read thread frequency
+  double state_poll_rate_hz = 0.0;            ///< statusword SDO polling; 0 disables it
 };
 
 /// EMCY event callback signature.
@@ -50,7 +51,7 @@ using EmcyCallback =
  * Responsibilities:
  *  - open / bootstrap / enable / disable the configured motors
  *  - pass joint-side radians directly through the SDK _ex APIs
- *  - background thread polling actual position/velocity/state into a mutex cache
+ *  - background thread polling actual position/velocity into a mutex cache
  *  - CSP write of configured target positions with a unified SYNC broadcast
  *  - joint limit clamping and EMCY detection
  *
@@ -132,6 +133,7 @@ public:
 private:
   // internal helpers
   bool open_motors();
+  bool refresh_feedback_locked(bool send_sync, int poll_timeout_ms);
   void start_read_thread();
   void stop_read_thread();
   void read_loop();
@@ -147,6 +149,7 @@ private:
 
   // cached state (mutex protected)
   mutable std::mutex state_mutex_;
+  mutable std::mutex sdk_mutex_;
   std::array<double, kArmJoints> cached_pos_rad_{};
   std::array<double, kArmJoints> cached_vel_rad_{};
   std::array<Cia402State_t, kArmJoints> cached_states_{};

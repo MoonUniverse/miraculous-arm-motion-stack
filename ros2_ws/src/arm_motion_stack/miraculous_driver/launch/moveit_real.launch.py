@@ -21,6 +21,7 @@ def generate_launch_description():
     position_max = LaunchConfiguration("position_max")
     sync_period_us = LaunchConfiguration("sync_period_us")
     read_rate_hz = LaunchConfiguration("read_rate_hz")
+    state_poll_rate_hz = LaunchConfiguration("state_poll_rate_hz")
     arm_description_share = get_package_share_directory("arm_description")
     robot_xacro = os.path.join(arm_description_share, "urdf", "arm.urdf.xacro")
 
@@ -37,6 +38,7 @@ def generate_launch_description():
                 " position_max:=", position_max,
                 " sync_period_us:=", sync_period_us,
                 " read_rate_hz:=", read_rate_hz,
+                " state_poll_rate_hz:=", state_poll_rate_hz,
             ]),
             value_type=str,
         )
@@ -54,6 +56,8 @@ def generate_launch_description():
         DeclareLaunchArgument("position_max", default_value="0.0,0.0,0.0,0.0,0.0,0.0"),
         DeclareLaunchArgument("sync_period_us", default_value="0"),
         DeclareLaunchArgument("read_rate_hz", default_value="100.0"),
+        DeclareLaunchArgument("state_poll_rate_hz", default_value="0.0",
+                              description="Statusword SDO polling rate. 0 disables polling."),
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
@@ -75,6 +79,7 @@ def generate_launch_description():
                 "position_max": position_max,
                 "sync_period_us": sync_period_us,
                 "read_rate_hz": read_rate_hz,
+                "state_poll_rate_hz": state_poll_rate_hz,
             }.items(),
         ),
         IncludeLaunchDescription(

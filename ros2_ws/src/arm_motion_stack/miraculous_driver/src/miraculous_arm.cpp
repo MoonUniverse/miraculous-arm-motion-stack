@@ -138,23 +138,34 @@ bool MiraculousArm::enable_csp()
   }
   // Bootstrap (NMT Operational) is already done in init(); here we only enable
   // the power stage and switch to CSP.
-  for (const auto & joint : config_.joints) {
-    auto * motor = motors_[joint.joint_index];
-    if (miraculous_motor_full_enable(motor) < 0) {
-      std::fprintf(stderr, "[miraculous_arm] enable_csp: enable failed joint %s\n",
-        joint.name.c_str());
-      return false;
+  {
+    std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
+    for (const auto & joint : config_.joints) {
+      auto * motor = motors_[joint.joint_index];
+      if (miraculous_motor_set_mode(motor, CIA_MODE_CSP) < 0) {
+        std::fprintf(stderr, "[miraculous_arm] enable_csp: set CSP mode failed joint %s\n",
+          joint.name.c_str());
+        return false;
+      }
+      if (miraculous_motor_full_enable(motor) < 0) {
+        std::fprintf(stderr, "[miraculous_arm] enable_csp: enable failed joint %s\n",
+          joint.name.c_str());
+        return false;
+      }
+      const bool manual_sync = (config_.sync_period_us == 0);
+      const uint32_t csp_period_us = manual_sync ?
+        static_cast<uint32_t>(std::max(1.0, 1.0e6 / std::max(config_.read_rate_hz, 1.0))) :
+        config_.sync_period_us;
+      if (miraculous_motor_csp_init(motor, csp_period_us, manual_sync) < 0) {
+        std::fprintf(stderr, "[miraculous_arm] enable_csp: csp_init failed joint %s\n",
+          joint.name.c_str());
+        return false;
+      }
     }
-    if (miraculous_motor_set_mode(motor, CIA_MODE_CSP) < 0) {
-      std::fprintf(stderr, "[miraculous_arm] enable_csp: set CSP mode failed joint %s\n",
-        joint.name.c_str());
-      return false;
-    }
-    const bool manual_sync = (config_.sync_period_us == 0);
-    if (miraculous_motor_csp_init(motor, config_.sync_period_us, manual_sync) < 0) {
-      std::fprintf(stderr, "[miraculous_arm] enable_csp: csp_init failed joint %s\n",
-        joint.name.c_str());
-      return false;
+    if (!refresh_feedback_locked(config_.sync_period_us == 0, 10)) {
+      std::fprintf(stderr,
+        "[miraculous_arm] enable_csp: feedback refresh before seed failed; "
+        "continuing with cached position\n");
     }
   }
   // Seed the CSP controller with the current position to avoid a jump on enable.
@@ -171,6 +182,7 @@ bool MiraculousArm::enable()
   if (!initialized_) {
     return false;
   }
+  std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
   for (const auto & joint : config_.joints) {
     if (miraculous_motor_full_enable(motors_[joint.joint_index]) < 0) {
       return false;
@@ -184,6 +196,7 @@ void MiraculousArm::disable()
   if (!initialized_) {
     return;
   }
+  std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
   for (const auto & joint : config_.joints) {
     if (motors_[joint.joint_index]) {
       if (config_.sync_period_us != 0) {
@@ -199,6 +212,7 @@ void MiraculousArm::quick_stop()
   if (!initialized_) {
     return;
   }
+  std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
   for (const auto & joint : config_.joints) {
     if (motors_[joint.joint_index]) {
       miraculous_motor_quick_stop(motors_[joint.joint_index]);
@@ -212,9 +226,12 @@ bool MiraculousArm::fault_reset()
     return false;
   }
   bool ok = true;
-  for (const auto & joint : config_.joints) {
-    if (miraculous_motor_fault_reset(motors_[joint.joint_index]) < 0) {
-      ok = false;
+  {
+    std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
+    for (const auto & joint : config_.joints) {
+      if (miraculous_motor_fault_reset(motors_[joint.joint_index]) < 0) {
+        ok = false;
+      }
     }
   }
   {
@@ -263,29 +280,85 @@ bool MiraculousArm::set_targets_rad(const std::array<double, kArmJoints> & targe
     return false;
   }
   bool ok = true;
-  for (const auto & joint : config_.joints) {
-    const size_t i = joint.joint_index;
-    if (miraculous_motor_csp_set_target_ex(
-        motors_[i], static_cast<float>(clamped[i]), POS_UNIT_RADIAN) < 0)
-    {
-      ok = false;
+  {
+    std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
+    for (const auto & joint : config_.joints) {
+      const size_t i = joint.joint_index;
+      if (miraculous_motor_csp_set_target_ex(
+          motors_[i], static_cast<float>(clamped[i]), POS_UNIT_RADIAN) < 0)
+      {
+        ok = false;
+      }
     }
-  }
-  // Unified manual SYNC so all axes apply targets on the same edge.
-  if (config_.sync_period_us == 0) {
-    send_sync();
+    // Unified manual SYNC so all axes apply targets on the same edge.
+    if (config_.sync_period_us == 0) {
+      if (!refresh_feedback_locked(true, 2)) {
+        ok = false;
+      }
+    }
   }
   return ok;
 }
 
 void MiraculousArm::send_sync()
 {
+  std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
   for (auto * motor : motors_) {
     if (motor) {
       miraculous_motor_sync_send(motor);
       return;
     }
   }
+}
+
+bool MiraculousArm::refresh_feedback_locked(bool send_sync, int poll_timeout_ms)
+{
+  MiraMotor * sync_motor = nullptr;
+  for (auto * motor : motors_) {
+    if (motor) {
+      sync_motor = motor;
+      break;
+    }
+  }
+  if (!sync_motor) {
+    return false;
+  }
+  if (send_sync && miraculous_motor_sync_send(sync_motor) < 0) {
+    std::fprintf(stderr, "[miraculous_arm] refresh_feedback: manual SYNC failed\n");
+    return false;
+  }
+
+  miraculous_motor_poll(sync_motor, poll_timeout_ms);
+
+  std::array<double, kArmJoints> refreshed_pos{};
+  std::array<double, kArmJoints> refreshed_vel{};
+  bool ok = true;
+  for (const auto & joint : config_.joints) {
+    const size_t i = joint.joint_index;
+    float p_rad = 0.0f;
+    float v_rad_s = 0.0f;
+    if (miraculous_motor_get_position_ex(motors_[i], &p_rad, POS_UNIT_RADIAN) < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] refresh_feedback: get_position_ex failed joint %s node %u\n",
+        joint.name.c_str(), joint.node_id);
+      ok = false;
+      continue;
+    }
+    miraculous_motor_get_velocity_ex(motors_[i], &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
+    refreshed_pos[i] = static_cast<double>(p_rad);
+    refreshed_vel[i] = static_cast<double>(v_rad_s);
+  }
+
+  if (ok) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    for (const auto & joint : config_.joints) {
+      const size_t i = joint.joint_index;
+      cached_pos_rad_[i] = refreshed_pos[i];
+      cached_vel_rad_[i] = refreshed_vel[i];
+    }
+    cache_valid_ = true;
+  }
+  return ok;
 }
 
 // ============================ safety ======================================
@@ -346,39 +419,69 @@ void MiraculousArm::read_loop()
   std::array<float, kArmJoints> joint_pos_rad{};
   std::array<float, kArmJoints> joint_vel_rad_s{};
   std::array<Cia402State_t, kArmJoints> states{};
+  std::array<bool, kArmJoints> position_ok{};
+  const bool poll_stateword = config_.state_poll_rate_hz > 0.0;
+  const size_t state_poll_interval = poll_stateword ?
+    static_cast<size_t>(std::max(1.0, config_.read_rate_hz / config_.state_poll_rate_hz)) : 0;
+  size_t read_tick = 0;
 
   while (read_thread_running_) {
     next_wake += period;
+    const bool poll_state = poll_stateword && (read_tick++ % state_poll_interval) == 0;
+    position_ok.fill(false);
 
-    for (const auto & joint : config_.joints) {
-      const size_t i = joint.joint_index;
-      auto * motor = motors_[i];
-      if (!motor) {
-        continue;
+    {
+      std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
+      // Poll first so get_position_ex/get_velocity_ex read the latest TPDO cache.
+      for (auto * motor : motors_) {
+        if (motor) {
+          miraculous_motor_poll(motor, 0);
+          break;
+        }
       }
-      float p_rad = 0.0f;
-      float v_rad_s = 0.0f;
-      Cia402State_t s = CIA_STATE_NOT_READY_TO_SWITCH_ON;
-      miraculous_motor_get_position_ex(motor, &p_rad, POS_UNIT_RADIAN);
-      miraculous_motor_get_velocity_ex(motor, &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
-      miraculous_motor_get_state(motor, &s);
-      joint_pos_rad[i] = p_rad;
-      joint_vel_rad_s[i] = v_rad_s;
-      states[i] = s;
-    }
-    // Poll the shared CAN context to dispatch receive/EMCY callbacks.
-    for (auto * motor : motors_) {
-      if (motor) {
-        miraculous_motor_poll(motor, 0);
-        break;
+      for (const auto & joint : config_.joints) {
+        const size_t i = joint.joint_index;
+        auto * motor = motors_[i];
+        if (!motor) {
+          continue;
+        }
+        float p_rad = 0.0f;
+        float v_rad_s = 0.0f;
+        if (miraculous_motor_get_position_ex(motor, &p_rad, POS_UNIT_RADIAN) < 0) {
+          continue;
+        }
+        miraculous_motor_get_velocity_ex(motor, &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
+        if (poll_state) {
+          Cia402State_t s = CIA_STATE_NOT_READY_TO_SWITCH_ON;
+          if (miraculous_motor_get_state(motor, &s) >= 0) {
+            states[i] = s;
+          }
+        }
+        joint_pos_rad[i] = p_rad;
+        joint_vel_rad_s[i] = v_rad_s;
+        position_ok[i] = true;
       }
     }
 
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
-      for (size_t i = 0; i < kArmJoints; ++i) {
-        cached_pos_rad_[i] = static_cast<double>(joint_pos_rad[i]);
-        cached_vel_rad_[i] = static_cast<double>(joint_vel_rad_s[i]);
+      bool all_configured_positions_ok = true;
+      for (const auto & joint : config_.joints) {
+        if (!position_ok[joint.joint_index]) {
+          all_configured_positions_ok = false;
+          break;
+        }
+      }
+      if (all_configured_positions_ok) {
+        for (const auto & joint : config_.joints) {
+          const size_t i = joint.joint_index;
+          cached_pos_rad_[i] = static_cast<double>(joint_pos_rad[i]);
+          cached_vel_rad_[i] = static_cast<double>(joint_vel_rad_s[i]);
+        }
+        cache_valid_ = true;
+      }
+      for (const auto & joint : config_.joints) {
+        const size_t i = joint.joint_index;
         cached_states_[i] = states[i];
         if (states[i] == CIA_STATE_FAULT ||
           states[i] == CIA_STATE_FAULT_REACTION_ACTIVE)
@@ -386,7 +489,6 @@ void MiraculousArm::read_loop()
           fault_detected_ = true;
         }
       }
-      cache_valid_ = true;
     }
 
     std::this_thread::sleep_until(next_wake);
@@ -408,6 +510,16 @@ void MiraculousArm::can_recv_trampoline(
   const uint16_t error_code =
     static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
   const uint8_t error_reg = data[2];
+  bool configured_node = false;
+  for (const auto & joint : self->config_.joints) {
+    if (joint.node_id == node_id) {
+      configured_node = true;
+      break;
+    }
+  }
+  if (!configured_node) {
+    return;
+  }
   {
     std::lock_guard<std::mutex> lock(self->state_mutex_);
     self->fault_detected_ = true;

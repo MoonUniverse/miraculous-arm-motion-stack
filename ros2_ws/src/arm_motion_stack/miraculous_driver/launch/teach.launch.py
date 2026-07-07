@@ -35,8 +35,8 @@ def generate_launch_description():
         parameters=[{
             "can_interface": can_interface,
             "baudrate": baudrate,
-            "node_ids": node_ids,
-            "joint_indices": joint_indices,
+            "node_ids": ParameterValue(node_ids, value_type=str),
+            "joint_indices": ParameterValue(joint_indices, value_type=str),
             "joint_states_topic": joint_states_topic,
             "record_rate": record_rate,
             "auto_record": auto_record,

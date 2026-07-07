@@ -155,6 +155,8 @@ public:
       declare_parameter<std::string>("position_min", "0.0,0.0,0.0,0.0,0.0,0.0");
     const std::string position_max_str =
       declare_parameter<std::string>("position_max", "0.0,0.0,0.0,0.0,0.0,0.0");
+    sync_period_us_ = static_cast<uint32_t>(
+      declare_parameter<int>("sync_period_us", 10000));              // 0=manual, >0=SDK timer
 
     // ---- trajectory parameters ----
     amplitude_ = declare_parameter<double>("amplitude", 0.03);        // [rad]
@@ -212,7 +214,7 @@ public:
     ArmConfig config;
     config.can_interface = can_interface_;
     config.baudrate = static_cast<CiaBaudrate_t>(baudrate_);
-    config.sync_period_us = 0;
+    config.sync_period_us = sync_period_us_;
     config.read_rate_hz = std::max(frequency_, 100.0);
     for (size_t i = 0; i < node_ids.size(); ++i) {
       const size_t joint_index = static_cast<size_t>(joint_indices[i]);
@@ -256,8 +258,9 @@ public:
       std::bind(&TrajectoryTrackingTestNode::publish_state, this));
 
     RCLCPP_INFO(get_logger(),
-      "Trajectory tracking test ready. joint=J%zu waveform=%s amp=%.3f period=%.1f freq=%.0f",
-      test_joint_ + 1, waveform_.c_str(), amplitude_, period_, frequency_);
+      "Trajectory tracking test ready. joint=J%zu waveform=%s amp=%.3f period=%.1f "
+      "freq=%.0f sync_period_us=%u",
+      test_joint_ + 1, waveform_.c_str(), amplitude_, period_, frequency_, sync_period_us_);
     RCLCPP_INFO(get_logger(),
       "Call: ros2 service call /trajectory_test/start std_srvs/srv/Trigger");
   }
@@ -322,7 +325,11 @@ private:
     // Read the settled position → use as DC offset so the sine is centred
     // on the current joint angle (avoids a jump to zero).
     std::array<double, kArmJoints> cur{};
-    arm_->get_positions_rad(cur);
+    if (!arm_->get_positions_rad(cur)) {
+      RCLCPP_ERROR(get_logger(), "No valid motor feedback after enable_csp; refusing to start.");
+      arm_->disable();
+      return false;
+    }
     dc_offset_ = cur[test_joint_];
     RCLCPP_INFO(get_logger(), "DC offset (current J%zu pos) = %.6f rad",
       test_joint_ + 1, dc_offset_);
@@ -413,7 +420,11 @@ private:
         targets[i] = (i == test_joint_) ? command : cur[i];
       }
     }
-    arm_->set_targets_rad(targets);
+    if (!arm_->set_targets_rad(targets)) {
+      RCLCPP_ERROR(get_logger(), "Failed to send CSP target at t=%.3f, stopping test.", t);
+      stop_test();
+      return;
+    }
 
     // Read actual position (use the cached value from the background thread).
     std::array<double, kArmJoints> actual{};
@@ -446,6 +457,10 @@ private:
     double sum_cmd_act = 0.0;
     double sum_cmd_sq = 0.0;
     double sum_act_sq = 0.0;
+    double min_cmd = samples_.front().command_rad;
+    double max_cmd = samples_.front().command_rad;
+    double min_act = samples_.front().actual_rad;
+    double max_act = samples_.front().actual_rad;
 
     for (const auto & s : samples_) {
       const double e = s.error_rad;
@@ -460,6 +475,10 @@ private:
       sum_cmd_act += s.command_rad * s.actual_rad;
       sum_cmd_sq += s.command_rad * s.command_rad;
       sum_act_sq += s.actual_rad * s.actual_rad;
+      min_cmd = std::min(min_cmd, s.command_rad);
+      max_cmd = std::max(max_cmd, s.command_rad);
+      min_act = std::min(min_act, s.actual_rad);
+      max_act = std::max(max_act, s.actual_rad);
     }
 
     const double rmse = std::sqrt(sum_sq_err / n);
@@ -482,6 +501,10 @@ private:
     RCLCPP_INFO(get_logger(), "========================================");
     RCLCPP_INFO(get_logger(), "  Samples:       %zu", n);
     RCLCPP_INFO(get_logger(), "  Duration:      %.3f s", samples_.back().timestamp);
+    RCLCPP_INFO(get_logger(), "  Command range: %.6f .. %.6f rad",
+      min_cmd, max_cmd);
+    RCLCPP_INFO(get_logger(), "  Actual range:  %.6f .. %.6f rad",
+      min_act, max_act);
     RCLCPP_INFO(get_logger(), "  RMSE:          %.6f rad  (%.3f deg)",
       rmse, rmse * 180.0 / M_PI);
     RCLCPP_INFO(get_logger(), "  MAE:           %.6f rad  (%.3f deg)",
@@ -552,6 +575,7 @@ private:
   // ---- motor / CAN params ----
   std::string can_interface_;
   int baudrate_{1000};
+  uint32_t sync_period_us_{10000};
   std::string joint_states_topic_;
 
   // ---- trajectory params ----

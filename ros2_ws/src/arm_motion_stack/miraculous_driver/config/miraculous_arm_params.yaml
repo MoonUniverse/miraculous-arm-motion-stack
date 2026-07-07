@@ -17,4 +17,6 @@ miraculous_driver:
     position_max: "0.0,0.0,0.0,0.0,0.0,0.0"
     sync_period_us: 0
     read_rate_hz: 100.0
+    # Statusword polling uses SDO (0x6041). Keep disabled during CSP tracking unless diagnosing state machine transitions.
+    state_poll_rate_hz: 0.0
     joint_states_topic: "/arm_joint_states"

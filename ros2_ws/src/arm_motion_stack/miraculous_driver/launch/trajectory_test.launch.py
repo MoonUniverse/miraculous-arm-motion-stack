@@ -16,6 +16,7 @@ def generate_launch_description():
     joint_indices = LaunchConfiguration("joint_indices")
     position_min = LaunchConfiguration("position_min")
     position_max = LaunchConfiguration("position_max")
+    sync_period_us = LaunchConfiguration("sync_period_us")
     amplitude = LaunchConfiguration("amplitude")
     period = LaunchConfiguration("period")
     frequency = LaunchConfiguration("frequency")
@@ -43,10 +44,11 @@ def generate_launch_description():
         parameters=[{
             "can_interface": can_interface,
             "baudrate": baudrate,
-            "node_ids": node_ids,
-            "joint_indices": joint_indices,
-            "position_min": position_min,
-            "position_max": position_max,
+            "node_ids": ParameterValue(node_ids, value_type=str),
+            "joint_indices": ParameterValue(joint_indices, value_type=str),
+            "position_min": ParameterValue(position_min, value_type=str),
+            "position_max": ParameterValue(position_max, value_type=str),
+            "sync_period_us": sync_period_us,
             "joint_states_topic": joint_states_topic,
             "amplitude": amplitude,
             "period": period,
@@ -68,6 +70,8 @@ def generate_launch_description():
                               description="ROS joint indices for node_ids: 0=J1..5=J6"),
         DeclareLaunchArgument("position_min", default_value="0.0,0.0,0.0,0.0,0.0,0.0"),
         DeclareLaunchArgument("position_max", default_value="0.0,0.0,0.0,0.0,0.0,0.0"),
+        DeclareLaunchArgument("sync_period_us", default_value="10000",
+                              description="CSP SYNC period [us]. 0=manual, >0=SDK timer"),
         DeclareLaunchArgument("amplitude", default_value="0.03",
                               description="Sine/cosine amplitude [rad]"),
         DeclareLaunchArgument("period", default_value="6.0",

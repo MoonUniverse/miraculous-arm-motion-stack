@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
-  <xacro:macro name="arm_ros2_control" params="name hardware_type can_interface baudrate node_ids joint_indices position_min position_max sync_period_us read_rate_hz">
+  <xacro:macro name="arm_ros2_control" params="name hardware_type can_interface baudrate node_ids joint_indices position_min position_max sync_period_us read_rate_hz state_poll_rate_hz">
     <ros2_control name="${name}" type="system">
       <hardware>
         <xacro:if value="${hardware_type == 'fake'}">
@@ -28,6 +28,7 @@
           <param name="position_max">${position_max}</param>
           <param name="sync_period_us">${sync_period_us}</param>
           <param name="read_rate_hz">${read_rate_hz}</param>
+          <param name="state_poll_rate_hz">${state_poll_rate_hz}</param>
         </xacro:if>
       </hardware>
 

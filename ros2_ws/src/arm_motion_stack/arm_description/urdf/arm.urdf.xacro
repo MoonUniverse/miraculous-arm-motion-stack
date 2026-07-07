@@ -9,6 +9,7 @@
   <xacro:arg name="position_max" default="0.0,0.0,0.0,0.0,0.0,0.0"/>
   <xacro:arg name="sync_period_us" default="0"/>
   <xacro:arg name="read_rate_hz" default="100.0"/>
+  <xacro:arg name="state_poll_rate_hz" default="0.0"/>
 
   <xacro:include filename="materials.xacro"/>
   <!-- Converted from urdf/original/ARM.urdf; link and joint names are preserved. -->
@@ -33,5 +34,6 @@
     position_min="$(arg position_min)"
     position_max="$(arg position_max)"
     sync_period_us="$(arg sync_period_us)"
-    read_rate_hz="$(arg read_rate_hz)"/>
+    read_rate_hz="$(arg read_rate_hz)"
+    state_poll_rate_hz="$(arg state_poll_rate_hz)"/>
 </robot>
