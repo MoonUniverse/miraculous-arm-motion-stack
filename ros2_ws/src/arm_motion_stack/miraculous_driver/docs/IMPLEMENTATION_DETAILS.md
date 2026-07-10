@@ -1,6 +1,6 @@
 # miraculous_driver 实现文档
 
-> 日期: 2026-06-22
+> 日期: 2026-06-22 (2026-07-07 更新: 对照 test_csp_ex 审查修复, 见第 9 节)
 > 状态: 构建通过 (x86_64 开发机), 待真实 CAN 总线测试
 
 ---
@@ -18,10 +18,12 @@
 ros2_ws/src/arm_motion_stack/miraculous_driver/docs/REAL_HARDWARE_BRINGUP.md
 ```
 
-当前 2026-07-02 SDK 适配：
+当前 git 版 SDK 适配（2026-07-08 起，见第 10 节）：
 
-- CMake 在 x86-64 上优先使用 `miraculous_sdk_x86_64_linux_gnu_20260702`。
-- ROS/MoveIt 侧和 SDK `_ex` position API 都使用关节输出侧 rad；driver 不再配置或应用减速比。
+- SDK 由电机同事负责构建/交付；driver 只消费 `include/miraculous_sdk.h` +
+  `libmiraculous_sdk`。CMake 默认找项目根目录 `miraculous_sdk/`，同时兼容
+  `build/lib/`（源码构建产物）与 `lib/`（交付/安装布局）。
+- ROS/MoveIt 侧和 SDK `_ex` position API 都使用关节输出侧 rad；2026-07-07 起 driver 将 `encoder_bw`/`reduction_ratio` 下发给 SDK（默认值即 SDK 默认，见 5.1）。
 - 速度反馈改用 `miraculous_motor_get_velocity_ex(..., VEL_SIDE_LOAD, VEL_UNIT_RAD_S)`。
 - 手动 SYNC 改用 `miraculous_motor_sync_send()`，不再直接发送 raw CAN `0x080`。
 - `node_ids` / `joint_indices` 支持只配置已安装关节；`joint_indices` 使用 `0=J1 ... 5=J6`。
@@ -36,13 +38,11 @@ ros2_ws/src/arm_motion_stack/miraculous_driver/docs/REAL_HARDWARE_BRINGUP.md
 
 ### SDK 版本
 
-项目根目录下有两个 SDK 变体, CMakeLists 根据主机架构自动选择:
-
-| 目录 | 架构 | 用途 |
-|------|------|------|
-| `miraculous_sdk_x86_64_linux_gnu_20260702/` | x86-64 | 当前使用的 2026-07-02 SDK |
-
-旧 `miraculous_sdk/` 和 `miraculous_sdk_x86_64/` 已从仓库移除。若需要 ARM/aarch64 或其他 SDK snapshot，构建时显式传入 `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk`。
+项目根目录只保留一个 SDK：直接从 git 拉取的源码仓 `miraculous_sdk/`（2026-07-08 起，
+替换了旧的 `miraculous_sdk_x86_64_linux_gnu_20260702` 预编译快照）。源码构建天然跨架构
+（x86-64 / aarch64 均可在目标机上编译），产物在 `miraculous_sdk/build/lib/`。
+其他位置的 SDK 通过 `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk` 显式指定
+（支持源码仓布局 `build/lib/` 或安装布局 `lib/`）。
 
 #### SDK API 升级 (2026-06-25)
 
@@ -147,9 +147,10 @@ read() 调用方 (ros2_control / teach / playback)
 ### 3.3 CSP 多轴同步策略
 
 ```cpp
-// enable_csp() 中:
-const bool manual_sync = (sync_period_us == 0);
-miraculous_motor_csp_init(motor[i], sync_period_us, manual_sync);
+// enable_csp() 中 (2026-07-07 起):
+for (i = 0..5) miraculous_motor_csp_init(motor[i], period, /*manual=*/true);  // 只配 PDO
+if (sync_period_us != 0)
+  miraculous_motor_sync_start(motor[0], sync_period_us);  // 全臂共享一个 SYNC 定时器
 
 // set_targets_rad() 中, manual SYNC 模式:
 for (i = 0..5) miraculous_motor_csp_set_target_ex(motor[i], target_rad, POS_UNIT_RADIAN);
@@ -157,12 +158,12 @@ miraculous_motor_sync_send(motor[0]);  // 统一 SYNC
 ```
 
 - `sync_period_us == 0` 时使用手动 SYNC，wrapper 在 6 个目标全部写入后调用 SDK 的 `miraculous_motor_sync_send()`
-- `sync_period_us != 0` 时交给 SDK 定时 SYNC 管理，`disable()` 时调用 `miraculous_motor_sync_stop()`
+- `sync_period_us != 0` 时由**第一个电机句柄上唯一一个** SDK 定时器发 SYNC（csp_init 一律 `manual=true`，避免每个句柄各启一个定时器造成 SYNC 风暴），`disable()`/`shutdown()` 时 `sync_stop` 一次
 - 状态字 `0x6041` 通过 SDO 读取，默认不在读线程轮询；需要诊断状态机时再设置 `state_poll_rate_hz > 0`
 
 ### 3.4 单位语义
 
-ROS command/state、CSV 记录、轨迹测试参数以及 SDK `_ex` position API 统一使用关节输出侧弧度。driver 不再保存 `reduction_ratio`，也不调用 `miraculous_motor_set_reduction_ratio()`。
+ROS command/state、CSV 记录、轨迹测试参数以及 SDK `_ex` position API 统一使用关节输出侧弧度。2026-07-07 起 driver 会把 `encoder_bw` / `reduction_ratio` 硬件参数下发给 SDK（`set_encoder_bw` / `set_reduction_ratio`），默认值即 SDK 默认（19 bit / 100.0），仅换电机型号时才需要改。
 
 ### 3.5 生命周期
 
@@ -173,36 +174,43 @@ init()           open_motors ×6 → bootstrap ×6 → start_read_thread
 init_passive()   = init() + passive_=true
                  (示教模式, 电机去使能可自由拖动)
 
-enable_csp()     full_enable ×6 → set_mode(CSP) ×6 → csp_init(manual=true) ×6
-                 → seed 当前位置 (防跳变)
+enable_csp()     set_mode(CSP) ×6 → full_enable ×6 → csp_init(manual=true) ×6
+                 → (timer 模式: sync_start ×1, 全臂共享)
+                 → seed 当前位置 (防跳变; 读不到位置则失败并回退 disable)
                  passive_ = false
 
-disable()        motor_disable ×6 (Operation Enabled → Switched On)
+disable()        (timer 模式: sync_stop ×1) → motor_disable ×6
+                 (Operation Enabled → Switched On)
 
 quick_stop()     motor_quick_stop ×6 (急停减速)
 
 fault_reset()    motor_fault_reset ×6 → fault_detected_ = false
 
-shutdown()       stop_read_thread → motor_shutdown ×6 → motor_close ×6
+shutdown()       stop_read_thread → 注销 EMCY 回调 → (timer 模式: sync_stop ×1)
+                 → motor_shutdown ×6 → motor_close ×6
 ```
 
 ### 3.6 EMCY 检测
 
 ```cpp
-// can_recv_trampoline():
-//   过滤 CAN ID 0x081–0x0FF (EMCY = 0x080 + node_id)
-//   解析: error_code (bytes 0-1), error_reg (byte 2)
+// emcy_trampoline()（经 miraculous_motor_set_emcy_callback 注册，按总线一次）:
+//   SDK 分发器已解析好 node_id / error_code / error_reg
+//   过滤非本臂节点
 //   设 fault_detected_ = true
 //   调用用户注册的 EmcyCallback
 ```
+
+注意：**不要**用 `miraculous_can_set_recv_callback` 做 EMCY 监听——SDK 的 CANopen
+主站自己占用该槽位做全部收包分发（TPDO 缓存/心跳/EMCY），覆盖它会导致位置反馈
+永久失效（详见第 10 节根因分析）。
 
 ### 3.7 ros2_control 插件生命周期
 
 | 回调 | 操作 |
 |------|------|
 | `on_init` | 校验 joint 接口 (position command, position+velocity state), 读取 initial_value |
-| `on_configure` | 解析硬件参数 → 构建 ArmConfig → arm_->init() → 注册 EMCY 回调 → 等待缓存 → seed 位置 |
-| `on_activate` | arm_->enable_csp() → active_=true |
+| `on_configure` | 解析硬件参数 → 构建 ArmConfig → arm_->init() → 注册 EMCY 回调 → 等待缓存 → seed 位置 (读不到编码器则 ERROR) |
+| `on_activate` | arm_->enable_csp() → 用编码器实时位置重新 seed states/commands (失败则 ERROR 并 disable) → active_=true |
 | `on_deactivate` | active_=false → arm_->disable() |
 | `on_cleanup` | arm_->shutdown() → arm_.reset() |
 | `read` | 拷贝缓存 → position_states_/velocity_states_, 检测 fault |
@@ -231,7 +239,9 @@ struct ArmConfig {
     std::string can_interface = "can0";
     CiaBaudrate_t baudrate = CIA_BAUDRATE_1000;
     std::vector<JointConfig> joints;  // 已安装关节, 1..6 个
-    uint32_t sync_period_us = 0;     // 0 = 手动 SYNC
+    uint32_t sync_period_us = 0;     // 0 = 手动 SYNC; 非 0 = 共享 SDK 定时器
+    uint8_t encoder_bw = 19;         // 编码器位宽 (2^bw counts/rev), SDK 默认
+    double reduction_ratio = 100.0;  // 减速比 (负载侧速度换算), SDK 默认
     double read_rate_hz = 100.0;
     double state_poll_rate_hz = 0.0; // 0 = 不轮询 0x6041 状态字
 };
@@ -270,19 +280,21 @@ class MiraculousArm {
 | SDK 函数 | 调用位置 | 说明 |
 |----------|---------|------|
 | `miraculous_motor_open` | `open_motors()` | 打开 6 个电机句柄 |
+| `miraculous_motor_set_encoder_bw` | `open_motors()` | 下发编码器位宽 (默认 19) |
+| `miraculous_motor_set_reduction_ratio` | `open_motors()` | 下发减速比 (默认 100.0) |
 | `miraculous_motor_bootstrap` | `init()` | NMT Reset → Operational |
 | `miraculous_motor_full_enable` | `enable_csp()` / `enable()` | PDS → Operation Enabled |
 | `miraculous_motor_set_mode` | `enable_csp()` | 设为 CIA_MODE_CSP |
-| `miraculous_motor_csp_init` | `enable_csp()` | `sync_period_us==0` 时手动 SYNC，否则 SDK 定时 SYNC |
+| `miraculous_motor_csp_init` | `enable_csp()` | 一律 `manual=true` (只配 PDO, 不启定时器) |
+| `miraculous_motor_sync_start` | `enable_csp()` | timer 模式下仅在第一个电机上启动一次 |
 | `miraculous_motor_csp_set_target_ex` | `set_targets_rad()` | 写入目标位置 (关节输出侧 rad) |
 | `miraculous_motor_get_position_ex` | `read_loop()` | 读取实际位置 (关节输出侧 rad) |
 | `miraculous_motor_get_velocity_ex` | `read_loop()` | 读取实际速度 (负载侧 rad/s) |
 | `miraculous_motor_get_state` | `read_loop()` | 读取 PDS 状态 |
-| `miraculous_motor_poll` | `read_loop()` | 处理 CAN 事件 (EMCY 等) |
-| `miraculous_motor_get_can_ctx` | `open_motors()` | 获取共享 CAN 上下文 |
-| `miraculous_motor_sync_send` | `send_sync()` | 发送手动 SYNC |
-| `miraculous_motor_sync_stop` | `disable()` | 停止 SDK 定时 SYNC |
-| `miraculous_can_set_recv_callback` | `open_motors()` | 注册 EMCY 接收回调 |
+| `miraculous_motor_poll` | `read_loop()` | 处理 CAN 事件 (TPDO/EMCY 等) |
+| `miraculous_motor_sync_send` | `send_sync()` / `read_loop()`(CSP 未激活时) / `refresh_feedback_locked()` | 发送手动 SYNC（TPDO 为 SYNC 触发） |
+| `miraculous_motor_sync_stop` | `disable()` / `shutdown()` | 停止共享 SDK 定时 SYNC (一次) |
+| `miraculous_motor_set_emcy_callback` | `open_motors()` / `shutdown()` | 注册/注销 EMCY 回调（按总线一次） |
 | `miraculous_motor_disable` | `disable()` | PDS → Switched On |
 | `miraculous_motor_quick_stop` | `quick_stop()` | 急停 |
 | `miraculous_motor_fault_reset` | `fault_reset()` | 故障复位 |
@@ -303,7 +315,9 @@ class MiraculousArm {
 | `joint_indices` | `0,1,2,3,4,5` | 每个 `node_id` 对应的 ROS 关节槽位, `0=J1 ... 5=J6` |
 | `position_min` | `0.0,...` | 软件下限 [rad], 可填 1 个、已装关节数量 N 个、或 6 个全量值 |
 | `position_max` | `0.0,...` | 软件上限 [rad], 可填 1 个、已装关节数量 N 个、或 6 个全量值 |
-| `sync_period_us` | `0` | 0=手动 SYNC, 非 0=SDK 定时器 |
+| `sync_period_us` | `0` | 0=手动 SYNC, 非 0=共享 SDK 定时器周期 [us] |
+| `encoder_bw` | `19` | 编码器位宽 (2^bw counts/rev), 范围 1..31, 默认即 SDK 默认 |
+| `reduction_ratio` | `100.0` | 减速比 (>0), 默认即 SDK 默认, 仅换电机型号时修改 |
 | `read_rate_hz` | `100.0` | 后台读取线程频率 |
 | `state_poll_rate_hz` | `0.0` | 状态字 SDO 轮询频率，0=关闭；轨迹跟踪默认关闭 |
 
@@ -355,7 +369,7 @@ colcon build --symlink-install --packages-select miraculous_driver \
 install/miraculous_driver/
 ├── lib/
 │   ├── libmiraculous_driver.so              # 核心 wrapper + 插件
-│   ├── libmiraculous_sdk.so -> .../miraculous_sdk_x86_64_linux_gnu_20260702/lib/...
+│   ├── libmiraculous_sdk.so                 # 从 miraculous_sdk/build/lib/ 拷入
 │   └── miraculous_driver/
 │       ├── teach_record_node                 # 示教记录可执行
 │       └── playback_node                     # 回放可执行
@@ -391,7 +405,7 @@ cat install/miraculous_driver/share/miraculous_driver/miraculous_driver_plugins.
 
 ### 6.4 CMakeLists 关键设计
 
-- **SDK 路径选择**: x86-64 默认使用 `miraculous_sdk_x86_64_linux_gnu_20260702`; 其他 SDK 通过 `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk` 指定
+- **SDK 路径选择**: 默认使用项目根目录源码仓 `miraculous_sdk/`（需先 cmake 构建，产物在 `build/lib/`）; 其他 SDK 通过 `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk` 指定
 - **库 vs 可执行文件安装路径**: 库 → `lib/` (pluginlib 查找), 可执行文件 → `lib/miraculous_driver/` (ros2 run 约定)
 - **RPATH**: `INSTALL_RPATH "$ORIGIN"` — 运行时在 .so 同级目录查找 `libmiraculous_sdk.so`
 - **SDK .so 安装**: `install(FILES ...)` 将预编译 SDK 库安装到 `lib/`
@@ -532,34 +546,121 @@ install(TARGETS teach_record_node playback_node RUNTIME DESTINATION lib/${PROJEC
 
 ---
 
-## 9. 待办事项
+## 9. 2026-07-07 对照 SDK 示例审查与修复
+
+电机工程师已用 `example/test_csp_ex.c` 在真机调通 SDK。本次将 driver 逐条对照 SDK
+官方示例做了代码审查，并修复发现的问题。板上验证步骤见
+[BOARD_TEST_CHECKLIST.md](BOARD_TEST_CHECKLIST.md)。
+
+### 9.1 审查结论：与官方示例一致、无需改动的部分
+
+| driver 写法 | 对照依据 |
+|-------------|---------|
+| `set_mode(CSP) → full_enable → csp_init` 使能顺序 | `test_csp_ex.c:74-83`（bootstrap 提前到 `init()`，等效） |
+| 手动 SYNC：6 关节全部 `csp_set_target_ex` 后发一帧统一 SYNC | `test_csp_ex.c:134-143`；SYNC 是广播帧，一帧同沿锁存全部轴 |
+| poll 第一个电机、读所有电机 TPDO 缓存 | `test_sync_read.c:75-88` 官方多电机模式 |
+| EMCY 用 `get_can_ctx` + `can_set_recv_callback` 捕获 | `test_emcy_callback.c:82-99`（driver 的 `len<3` 检查比示例 `len<2` 更安全） |
+| 弧度 `_ex` API、CMake 链接 `pthread`/`rt`、`$ORIGIN` RPATH | SDK 头文件注释与示例编译方式 |
+
+另确认：`test_csp_ex` 默认走 **timer** 模式（`argv[3]` 显式传 `manual` 才是手动），
+即工程师验证的是 SDK 定时器路径；driver 默认 manual 路径对电机固件完全等价
+（总线上的 SYNC 帧一模一样），只是节拍改由 controller_manager `update_rate` 主导。
+
+### 9.2 修复项（按严重度）
+
+| # | 严重度 | 问题 | 修复 |
+|---|--------|------|------|
+| 1 | 安全-高 | seed 失败不致命：读不到编码器时 `position_commands_` 保持 0，首个 `write()` 周期会命令全关节冲向 0 rad；且 configure→activate 之间电机脱使能、臂可能被扳动/下坠，旧 seed 已过期 | `enable_csp()` 读不到当前位置直接失败并回退 `disable()`；`on_configure` 等待缓存超时返回 ERROR；`on_activate` 使能后用编码器实时位置**重新** seed `position_states_`/`position_commands_`，失败拒绝激活 |
+| 2 | 高 | timer SYNC 模式下对 6 电机各调 `csp_init(manual=false)`，每个句柄各启一个 SYNC 定时器 → 总线最多 6 倍 SYNC 帧 | 所有电机一律 `csp_init(manual=true)`（只配 PDO），timer 模式仅在第一个电机上 `sync_start` 一次；`disable()`/`shutdown()` 对应只 `sync_stop` 一次 |
+| 3 | 中 | 编码器位宽/减速比从未下发，隐式依赖 SDK 默认值（19 bit / 100:1），换电机型号即失效 | `ArmConfig` 新增 `encoder_bw`/`reduction_ratio`，`open_motors()` 调 `set_encoder_bw`/`set_reduction_ratio`；作为可选硬件参数暴露，默认值即 SDK 默认（本机型已确认无需改） |
+| 4 | 小 | `miraculous_arm.cpp` 用 `std::max` 但未包含 `<algorithm>`（靠传递包含，板上工具链可能编不过）；`miraculous_system.cpp` 有死代码 `expand_single_value` | 补包含；删死代码 |
+| 5 | 小 | `state_poll_rate_hz=0`（默认）时每周期用初值 `NOT_READY` 覆盖 `cached_states_`；shutdown 关电机前未注销 CAN 回调，有回调打进析构中对象的窗口 | 仅在实际轮询状态字的周期写入状态缓存；`shutdown()` 先 `can_set_recv_callback(ctx, NULL, NULL)` 注销、再停 SYNC、最后关电机 |
+
+`miraculous_arm.cpp` 已在 x86 上通过 `g++ -fsyntax-only -Wall -Wextra` 零警告；
+`miraculous_system.cpp` 依赖 ROS 2 头文件，需板上编译验证。
+
+### 9.3 板上验证要点（详见 BOARD_TEST_CHECKLIST.md）
+
+- 修复 1：configure 后手扳关节再 activate，激活瞬间不跳变；拔 CAN 后激活必须被拒绝
+- 修复 2：`candump can0` 观察 `080` 帧 —— manual 模式频率 = update_rate 且只有一路；
+  timer 模式挂满 6 关节仍只有一路
+- 修复 3：手转关节 ~90°，`/joint_states` 变化 ≈ ±1.57 rad
+
+---
+
+## 10. 2026-07-08 适配 git 版 SDK 与"位置读不到"根因修复
+
+SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接拉取的源码仓
+`miraculous_sdk/`（可读全部实现源码）。对照源码逐一核对了 driver 的每个 SDK 调用，
+定位了 2026-07-07 板上 `get_position_ex failed joint J1 node 1 → enable_csp failed`
+的根因，并完成适配。
+
+### 10.1 根因（板上位置读取失败，两个叠加原因）
+
+1. **raw CAN 回调把 SDK 收包分发顶掉了**。`co_master.c` 初始化时通过
+   `miraculous_can_set_recv_callback(can_ctx, co_global_recv_callback, co)` 注册
+   自己的收包分发（TPDO 缓存更新 / 心跳 / EMCY 都走它）；该接口是**覆盖式**的
+   （`can_socket.c`: "简单策略: 优先使用全局回调"）。driver 在 `open_motors()` 里再
+   注册 EMCY 原始回调，就把 `co_global_recv_callback` 顶掉 → TPDO 缓存永不更新。
+   SDO 走同步直读路径不受影响，所以 bootstrap / full_enable / csp_init 全部成功、
+   唯独位置读取失败——与板上日志完全吻合。
+2. **`get_position` 只走 TPDO 缓存且 TPDO 是 SYNC 触发的**。`motion_state.c` 中
+   `get_position` 无 SDO 回退：`pdo_valid` 为假直接返回 `MRC_ERROR_TIMEOUT`；
+   PDO 映射为 EDS 出厂预配，TPDO2 (0x280+nid, 0x6064+0x606C) 由 SYNC 触发。
+   官方 `test_csp_ex.c` 读初始位置前先 `sync_send()`（注释"发送 SYNC 触发 TPDO"）。
+   driver 旧读线程从不发 SYNC → 使能前/示教模式下位置永远读不到。
+
+### 10.2 修改项
+
+| # | 修改 | 文件 |
+|---|------|------|
+| 1 | EMCY 改用 SDK 专用接口 `miraculous_motor_set_emcy_callback`（按总线注册一次，回调带 node_id），彻底移除 `miraculous_can_set_recv_callback` 及 `can_ctx_`/`can_recv_trampoline` | `miraculous_arm.{hpp,cpp}` |
+| 2 | 读线程在 **CSP 未激活**时（`csp_active_` 原子标志）每周期先发一帧 SYNC 再 poll(1ms)，使能前/示教模式反馈由此而来；CSP 激活后 SYNC 由 write 周期（manual）或 SDK 定时器（timer）提供，读线程不再注入额外 SYNC，避免同一目标被双重锁存干扰插补 | `miraculous_arm.{hpp,cpp}` |
+| 3 | `enable_csp()` 简化：新 `csp_init` 中 PDO 为出厂预配、timer 模式写各节点 0x1006 并（重)启**共享** master 定时器（幂等，无 SYNC 风暴），因此直接按模式传 `manual = (sync_period_us==0)`，删除"全部 manual + 首电机 sync_start"的旧规避 | `miraculous_arm.cpp` |
+| 4 | CMakeLists：默认 SDK 路径改为 `../../../../miraculous_sdk`，`find_library` 兼容 `build/lib/`（源码构建）与 `lib/`（安装布局），找不到时提示先构建 SDK；仅当链接 .so 时才安装它 | `CMakeLists.txt` |
+
+第 9.2 节修复 2/5 中关于"csp_init 全 manual + 单独 sync_start"“shutdown 注销 CAN
+回调"的描述由本节取代。`enable_emcy_monitor` 参数保留（默认 true），现在只控制
+是否注册专用 EMCY 回调，不再有干扰收包的风险。
+
+### 10.3 板上验证要点
+
+- 编译前先构建 SDK：`cmake -S miraculous_sdk -B miraculous_sdk/build && cmake --build miraculous_sdk/build`
+- 不使能启动（示教/仅 configure）：`/joint_states` 应立即有读数（读线程 SYNC 生效），
+  `candump can1,080:7FF` 应看到 read_rate_hz 频率的 SYNC
+- enable 后（manual 模式）：SYNC 频率应变为 write 周期频率且只有一路
+- 故障注入：EMCY 应经专用回调上报（ROS 日志 + `has_fault`），位置反馈不受影响
+
+## 11. 待办事项
 
 - [ ] 在 `config/miraculous_arm_params.yaml` 和 xacro/launch 中填入保守 `position_min` / `position_max` 软件限位
 - [ ] 在 ARM 目标机上用真实 CAN 总线进行端到端测试
-- [ ] 验证 SDK 风险项 (见计划文件):
-  - `csp_set_target` 是否自动发 SYNC (当前假设不自动发)
-  - `get_position` 延迟 (SDO vs TPDO 缓存)
-  - 未 `csp_init` 时 `get_position` 是否可用
+- [x] ~~`csp_set_target` 是否自动发 SYNC~~ — 2026-07-07 审查确认不自动发：`test_csp_ex.c:134-143` 在 set_target 后显式调用 `sync_send`
+- [x] ~~验证 SDK 风险项：`get_position` 是 SDO 还是 TPDO 缓存~~ — 2026-07-08 读源码确认：
+  纯 TPDO 缓存、无 SDO 回退，且 TPDO 为 SYNC 触发；读线程已改为 CSP 未激活时主动发 SYNC（见第 10 节）
+- [ ] 按 [BOARD_TEST_CHECKLIST.md](BOARD_TEST_CHECKLIST.md) 完成 2026-07-07 修复的板上验证
+- [ ] 如有装反方向的关节，driver 需增加 per-joint 符号翻转 (当前假设 URDF 零位/方向 = 电机侧)
 - [ ] 补充真实关节速度/加速度/effort 限位 (当前 URDF 为 0)
 - [ ] 示教模式下重力下垂问题评估 (可选 MIT 柔顺模式)
 - [ ] 将 `package.xml` 中 maintainer/license 从 TODO 改为真实值
 
 ---
 
-## 10. 文件索引
+## 12. 文件索引
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| [CMakeLists.txt](../CMakeLists.txt) | 123 | 构建配置, SDK 架构自动选择 |
+| [CMakeLists.txt](../CMakeLists.txt) | 129 | 构建配置, SDK 架构自动选择 |
 | [package.xml](../package.xml) | 34 | 包依赖声明 |
 | [miraculous_driver_plugins.xml](../miraculous_driver_plugins.xml) | 14 | pluginlib 插件注册 |
-| [miraculous_arm.hpp](../include/miraculous_driver/miraculous_arm.hpp) | 177 | wrapper 类声明 |
-| [miraculous_arm.cpp](../src/miraculous_arm.cpp) | 432 | wrapper 实现 |
+| [miraculous_arm.hpp](../include/miraculous_driver/miraculous_arm.hpp) | 178 | wrapper 类声明 |
+| [miraculous_arm.cpp](../src/miraculous_arm.cpp) | 590 | wrapper 实现 |
 | [miraculous_system.hpp](../include/miraculous_driver/miraculous_system.hpp) | 64 | 插件声明 |
-| [miraculous_system.cpp](../src/miraculous_system.cpp) | 364 | 插件实现 |
+| [miraculous_system.cpp](../src/miraculous_system.cpp) | 435 | 插件实现 |
 | [teach_record_node.cpp](../src/teach_record_node.cpp) | 260 | 示教记录节点 |
 | [playback_node.cpp](../src/playback_node.cpp) | 301 | 回放节点 |
-| [miraculous_arm_params.yaml](../config/miraculous_arm_params.yaml) | 19 | 电机参数 |
+| [miraculous_arm_params.yaml](../config/miraculous_arm_params.yaml) | 28 | 电机参数 |
+| [BOARD_TEST_CHECKLIST.md](BOARD_TEST_CHECKLIST.md) | — | 2026-07-07 修复的板上测试步骤 |
 | [real_ros2_controllers.yaml](../config/real_ros2_controllers.yaml) | 39 | controller 配置 |
 | [real_control.launch.py](../launch/real_control.launch.py) | 53 | ros2_control 启动 |
 | [moveit_real.launch.py](../launch/moveit_real.launch.py) | 55 | MoveIt 启动 |

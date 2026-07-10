@@ -34,10 +34,20 @@ struct ArmConfig
   CiaBaudrate_t baudrate = CIA_BAUDRATE_1000; ///< CAN baudrate (0 = keep current)
   std::vector<JointConfig> joints;            ///< configured real joints, 1..kArmJoints entries
   /// CSP SYNC period [us]. 0 = manual SYNC (wrapper sends one unified SYNC frame
-  /// per write cycle after setting all targets). Non-zero = SDK internal SYNC timer.
+  /// per write cycle after setting all targets). Non-zero = one shared SDK SYNC
+  /// timer started on the first motor handle (never one timer per motor).
   uint32_t sync_period_us = 0;
+  /// Encoder bits for the SDK radian conversion (2^bw counts/rev). SDK default 19.
+  uint8_t encoder_bw = 19;
+  /// Gear ratio for load-side velocity conversion. SDK default 100.
+  double reduction_ratio = 100.0;
   double read_rate_hz = 100.0;                ///< background read thread frequency
   double state_poll_rate_hz = 0.0;            ///< statusword SDO polling; 0 disables it
+  /// Register the SDK's dedicated EMCY callback (miraculous_motor_set_emcy_callback).
+  /// Never use miraculous_can_set_recv_callback here: the SDK's CANopen master
+  /// occupies that slot for its own RX dispatch (TPDO cache / heartbeat / EMCY)
+  /// and re-registering it silently kills all position feedback.
+  bool enable_emcy_monitor = true;
 };
 
 /// EMCY event callback signature.
@@ -86,8 +96,11 @@ public:
 
   // ---- PDS state machine ---------------------------------------------------
 
-  /// Bootstrap + full_enable + set_mode(CSP) + csp_init for configured motors.
-  /// After this the arm follows set_targets_rad() each write cycle.
+  /// set_mode(CSP) + full_enable + csp_init for configured motors (bootstrap is
+  /// done in init()). Seeds the CSP targets with the current position; fails if
+  /// that position cannot be read, so a successful return guarantees the arm
+  /// holds its pose. After this the arm follows set_targets_rad() each write
+  /// cycle.
   bool enable_csp();
 
   /// Enable all motors (without switching to CSP). Rarely needed directly.
@@ -127,7 +140,7 @@ public:
   bool check_limits(std::array<double, kArmJoints> & targets) const;
 
   /// Register an EMCY callback. EMCY frames (CAN id 0x080 + node_id) are
-  /// detected via the shared CAN receive callback.
+  /// delivered through the SDK's per-bus EMCY dispatcher.
   void set_emcy_callback(EmcyCallback callback);
 
 private:
@@ -137,15 +150,21 @@ private:
   void start_read_thread();
   void stop_read_thread();
   void read_loop();
-  static void can_recv_trampoline(
-    uint32_t can_id, const uint8_t * data, uint8_t len, void * user_data);
+  static void emcy_trampoline(
+    uint8_t node_id, uint16_t error_code, uint8_t error_reg,
+    const uint8_t * mfg_data, uint8_t mfg_len, void * user_data);
 
   ArmConfig config_;
   std::array<MiraMotor *, kArmJoints> motors_{};
-  MiraCanCtx * can_ctx_{nullptr};
 
   bool initialized_{false};
   bool passive_{false};
+  /// True while CSP is enabled: the SYNC source is then the write cycle
+  /// (manual mode) or the SDK timer (timer mode), so the read thread must not
+  /// inject extra SYNC edges. While false, the read thread sends one SYNC per
+  /// cycle because the drive's TPDOs are SYNC-triggered and would otherwise
+  /// never update the position cache.
+  std::atomic<bool> csp_active_{false};
 
   // cached state (mutex protected)
   mutable std::mutex state_mutex_;

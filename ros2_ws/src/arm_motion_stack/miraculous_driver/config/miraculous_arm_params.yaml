@@ -15,7 +15,13 @@ miraculous_driver:
     # 0/0 disables clamping for that joint. Replace with measured safe limits before motion tests.
     position_min: "0.0,0.0,0.0,0.0,0.0,0.0"
     position_max: "0.0,0.0,0.0,0.0,0.0,0.0"
+    # 0 = manual SYNC (one unified frame per write cycle, recommended with
+    # ros2_control). >0 = one shared SDK SYNC timer with this period [us].
     sync_period_us: 0
+    # SDK radian-conversion parameters; these are the SDK defaults
+    # (2^19 counts/rev, 100:1). Only change for a different motor model.
+    encoder_bw: 19
+    reduction_ratio: 100.0
     read_rate_hz: 100.0
     # Statusword polling uses SDO (0x6041). Keep disabled during CSP tracking unless diagnosing state machine transitions.
     state_poll_rate_hz: 0.0

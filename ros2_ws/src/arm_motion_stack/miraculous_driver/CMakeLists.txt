@@ -2,20 +2,15 @@ cmake_minimum_required(VERSION 3.10)
 project(miraculous_driver)
 
 # ---- miraculous_sdk (CANopen/CiA402 motor C SDK) ----
-# The current checked-in SDK lives outside the ROS workspace at
-# <project_root>/miraculous_sdk_x86_64_linux_gnu_20260702.
-# From ros2_ws/src/arm_motion_stack/miraculous_driver that is 4 levels up.
-# For other architectures or SDK snapshots, pass:
+# The SDK is owned and built by the motor team; this package only consumes
+# include/miraculous_sdk.h plus a built libmiraculous_sdk. Both layouts work:
+#   - source checkout with build artifacts in build/lib/ (cmake build)
+#   - delivered/installed prefix with lib/
+# Default is the checkout at <project_root>/miraculous_sdk. Override with:
 #   -DMIRACULOUS_SDK_DIR=/abs/path/to/sdk
-if(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "amd64")
-  set(_SDK_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../miraculous_sdk_x86_64_linux_gnu_20260702")
-else()
-  set(_SDK_DEFAULT "")
-endif()
-
 set(MIRACULOUS_SDK_DIR
-  "${_SDK_DEFAULT}"
-  CACHE PATH "Path to the miraculous_sdk root (contains include/ and lib/)")
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../../miraculous_sdk"
+  CACHE PATH "Path to the miraculous_sdk root (source checkout or installed prefix)")
 
 if(NOT EXISTS "${MIRACULOUS_SDK_DIR}/include/miraculous_sdk.h")
   message(FATAL_ERROR
@@ -25,9 +20,17 @@ endif()
 
 find_library(MIRACULOUS_SDK_LIB
   NAMES miraculous_sdk
-  PATHS "${MIRACULOUS_SDK_DIR}/lib"
-  NO_DEFAULT_PATH
-  REQUIRED)
+  PATHS "${MIRACULOUS_SDK_DIR}/build/lib" "${MIRACULOUS_SDK_DIR}/lib"
+  NO_DEFAULT_PATH)
+if(NOT MIRACULOUS_SDK_LIB)
+  message(FATAL_ERROR
+    "libmiraculous_sdk not found under '${MIRACULOUS_SDK_DIR}/build/lib' or "
+    "'${MIRACULOUS_SDK_DIR}/lib'. Get a built SDK from the motor team, or build "
+    "the checkout once:\n"
+    "  cmake -S ${MIRACULOUS_SDK_DIR} -B ${MIRACULOUS_SDK_DIR}/build\n"
+    "  cmake --build ${MIRACULOUS_SDK_DIR}/build")
+endif()
+get_filename_component(MIRACULOUS_SDK_LIBDIR "${MIRACULOUS_SDK_LIB}" DIRECTORY)
 message(STATUS "miraculous_sdk: include=${MIRACULOUS_SDK_DIR}/include lib=${MIRACULOUS_SDK_LIB}")
 
 find_package(ament_cmake REQUIRED)
@@ -50,7 +53,7 @@ target_include_directories(${PROJECT_NAME}
   PRIVATE
     ${MIRACULOUS_SDK_DIR}/include
 )
-target_link_directories(${PROJECT_NAME} PRIVATE ${MIRACULOUS_SDK_DIR}/lib)
+target_link_directories(${PROJECT_NAME} PRIVATE ${MIRACULOUS_SDK_LIBDIR})
 target_link_libraries(${PROJECT_NAME}
   ${MIRACULOUS_SDK_LIB}
   pthread
@@ -65,7 +68,7 @@ ament_target_dependencies(${PROJECT_NAME}
 )
 # Runtime: find libmiraculous_sdk.so next to this library ($ORIGIN).
 set_target_properties(${PROJECT_NAME} PROPERTIES
-  BUILD_RPATH "${MIRACULOUS_SDK_DIR}/lib"
+  BUILD_RPATH "${MIRACULOUS_SDK_LIBDIR}"
   INSTALL_RPATH "$ORIGIN"
 )
 message(STATUS "Host arch: ${CMAKE_SYSTEM_PROCESSOR}  =>  SDK: ${MIRACULOUS_SDK_DIR}")
@@ -109,8 +112,11 @@ install(
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
-# Ship the prebuilt SDK shared library next to our targets so $ORIGIN RPATH resolves.
-install(FILES "${MIRACULOUS_SDK_DIR}/lib/libmiraculous_sdk.so" DESTINATION lib)
+# Ship the SDK shared library next to our targets so $ORIGIN RPATH resolves.
+# (When find_library picked the static .a, nothing needs installing.)
+if(MIRACULOUS_SDK_LIB MATCHES "\\.so$")
+  install(FILES "${MIRACULOUS_SDK_LIB}" DESTINATION lib)
+endif()
 
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config docs launch DESTINATION share/${PROJECT_NAME})

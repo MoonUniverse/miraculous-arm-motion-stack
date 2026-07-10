@@ -21,16 +21,16 @@
 #define POSITION_TOLERANCE  100
 
 /* 每组内移动次数 */
-#define MOVES_PER_BATCH     10
+#define MOVES_PER_BATCH     20
 
 /* 测试组数（负数表示无限循环，按 Ctrl+C 退出） */
-#define BATCH_COUNT         4
+#define BATCH_COUNT         2
 
 /* 每步的步进脉冲数 */
-#define STEP_SIZE           (524288*4/10/360)
+#define STEP_SIZE           (524288*4/10/360) // 0.4 度
 
 /* 每次下发后等待电机到位的时间 (us) */
-#define SETTLE_TIME_US     10000 /* 10 ms */
+#define SETTLE_TIME_US     15000 /* 10 ms */
 
 /* 速度判零阈值 (脉冲/s) */
 #define VELOCITY_ZERO_THRESHOLD  10
@@ -125,6 +125,7 @@ int main(int argc, char **argv)
     int passed = 0;
     int failed = 0;
     int move_no = 0;
+    int move_display = 0;   /* 显示序号 */
     int32_t direction = 1;           /* 1: 正向, -1: 反向 */
     int32_t pos = 0;
     int32_t batch_base = 0;
@@ -147,19 +148,22 @@ int main(int argc, char **argv)
         }
         batch_base = pos;
 
-        for (int m = 0; m < MOVES_PER_BATCH; m++) {
+        for (int m = 0; m <= MOVES_PER_BATCH; m++) {
             if (g_quit) break;
 
             move_no++;
-            int32_t target = batch_base + direction * STEP_SIZE * (m + 1);
 
-            /* 发送目标位置 */
-            int ret = miraculous_motor_csp_set_target(motor, target);
-            if (ret < 0) {
-                fprintf(stderr, "CSP set target #%d failed: %s\n",
-                        move_no, mrc_strerror(ret));
-                failed++;
-                continue;
+            /* 最后一次不发目标 */
+            if (m < MOVES_PER_BATCH) {
+                int32_t target = batch_base + direction * STEP_SIZE * (m + 1);
+
+                int ret = miraculous_motor_csp_set_target(motor, target);
+                if (ret < 0) {
+                    fprintf(stderr, "CSP set target #%d failed: %s\n",
+                            move_no, mrc_strerror(ret));
+                    failed++;
+                    continue;
+                }
             }
 
             /* 发送 SYNC 帧, 通知从站锁存目标位置 */
@@ -167,22 +171,21 @@ int main(int argc, char **argv)
 
             usleep(SETTLE_TIME_US);
 
-            /* 读取实际位置 (本次 SYNC 读取的是上一目标到位后的位置) */
+            /* 读取实际位置 (本次 SYNC 的位置是上一目标到位后的结果) */
             if (miraculous_motor_get_position(motor, &pos) < 0) {
                 fprintf(stderr, "Failed to read position after move #%d\n", move_no);
                 failed++;
                 continue;
             }
 
-            /* 第一次不比较, 保存位置后继续 */
-            if (move_no == 1) {
-                printf(" %3d | 0x%08X | 0x%08X |   ----    | SKIP\n",
-                       move_no, target, pos);
+            /* 第一次不显示 */
+            if (m == 0) {
                 continue;
             }
 
-            /* 计算差值: 用本次读到的位置与上一个目标比较 */
-            int32_t prev_target = batch_base + direction * STEP_SIZE * (m);  /* 上一个目标 */
+            move_display++;
+            /* 用本次位置与上一个目标比较 */
+            int32_t prev_target = batch_base + direction * STEP_SIZE * m;
             int32_t delta = prev_target - pos;
             int32_t total_move = STEP_SIZE;
 
@@ -196,7 +199,7 @@ int main(int argc, char **argv)
             }
 
             printf(" %3d | 0x%08X | 0x%08X | %+6d (%d%%) | %s\n",
-                   move_no, target, pos, delta,
+                   move_display, prev_target, pos, delta,
                    (total_move > 0) ? (int)((double)abs(delta) / total_move * 100) : 0,
                    status);
         }
@@ -205,13 +208,15 @@ int main(int argc, char **argv)
         int32_t last_target = batch_base + direction * STEP_SIZE * MOVES_PER_BATCH;
         sleep(3);
         miraculous_motor_sync_send(motor);
+        usleep(SETTLE_TIME_US);
         int32_t final_pos;
         if (miraculous_motor_get_position(motor, &final_pos) == 0) {
             int32_t delta = last_target - final_pos;
             if (delta < 0) delta = -delta;
-            printf("  Batch %d final: 0x%08X (%d), target: 0x%08X (%d), delta: %d\n",
-                   batch + 1, final_pos, final_pos,
-                   last_target, last_target, delta);
+            const char *status = (abs(delta) <= POSITION_TOLERANCE) ? "PASS" : "FAIL";
+            printf(" F%-2d | 0x%08X | 0x%08X | %+6d (%d%%) | %s\n",
+                   batch + 1, last_target, final_pos, delta,
+                   (int)((double)abs(delta) / STEP_SIZE * 100), status);
         }
 
         /* 每组完成后方向取反 */

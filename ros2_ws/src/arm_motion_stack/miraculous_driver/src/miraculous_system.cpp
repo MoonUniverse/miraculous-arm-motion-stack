@@ -17,14 +17,6 @@ namespace
 {
 constexpr double kSeedWaitSec = 0.25;  // wait for the read thread cache on configure
 
-bool expand_single_value(std::vector<double> & values, size_t size)
-{
-  if (values.size() == 1 && size > 1) {
-    values.assign(size, values[0]);
-  }
-  return values.size() == size;
-}
-
 std::vector<int> default_joint_indices(size_t size)
 {
   std::vector<int> out;
@@ -140,6 +132,18 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
   config.sync_period_us = static_cast<uint32_t>(parse_int_param("sync_period_us", 0));
   config.read_rate_hz = parse_double_param("read_rate_hz", 100.0);
   config.state_poll_rate_hz = parse_double_param("state_poll_rate_hz", 0.0);
+  const int encoder_bw = parse_int_param("encoder_bw", 19);
+  config.reduction_ratio = parse_double_param("reduction_ratio", 100.0);
+  if (encoder_bw < 1 || encoder_bw > 31 || config.reduction_ratio <= 0.0) {
+    RCLCPP_FATAL(
+      rclcpp::get_logger("MiraculousSystem"),
+      "encoder_bw must be 1..31 and reduction_ratio > 0 (got %d, %.3f).",
+      encoder_bw, config.reduction_ratio);
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  config.encoder_bw = static_cast<uint8_t>(encoder_bw);
+  const std::string emcy_str = parse_string_param("enable_emcy_monitor", "true");
+  config.enable_emcy_monitor = !(emcy_str == "false" || emcy_str == "0");
 
   const std::vector<int> default_node_ids = {1, 2, 3, 4, 5, 6};
   const std::vector<int> node_ids =
@@ -212,16 +216,22 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  if (arm_->get_positions_rad(pos)) {
-    const size_t n = joint_names_.size();
-    for (size_t i = 0; i < n && i < kArmJoints; ++i) {
-      position_states_[i] = pos[i];
-      position_commands_[i] = pos[i];
-    }
-    RCLCPP_INFO(
+  if (!arm_->get_positions_rad(pos)) {
+    RCLCPP_FATAL(
       rclcpp::get_logger("MiraculousSystem"),
-      "Seeded initial positions from encoders.");
+      "No encoder feedback within %.2f s; refusing to configure so stale "
+      "commands can never be sent to the arm.", kSeedWaitSec);
+    arm_.reset();
+    return hardware_interface::CallbackReturn::ERROR;
   }
+  const size_t n = joint_names_.size();
+  for (size_t i = 0; i < n && i < kArmJoints; ++i) {
+    position_states_[i] = pos[i];
+    position_commands_[i] = pos[i];
+  }
+  RCLCPP_INFO(
+    rclcpp::get_logger("MiraculousSystem"),
+    "Seeded initial positions from encoders.");
 
   RCLCPP_INFO(
     rclcpp::get_logger("MiraculousSystem"),
@@ -243,6 +253,21 @@ hardware_interface::CallbackReturn MiraculousSystem::on_activate(
   if (!arm_->enable_csp()) {
     RCLCPP_FATAL(rclcpp::get_logger("MiraculousSystem"), "enable_csp failed.");
     return hardware_interface::CallbackReturn::ERROR;
+  }
+  // Re-seed commands from the encoders: the arm may have moved (or sagged)
+  // while disabled between configure and activate, and the first write() must
+  // command the pose the arm is actually in.
+  std::array<double, kArmJoints> pos{};
+  if (!arm_->get_positions_rad(pos)) {
+    RCLCPP_FATAL(
+      rclcpp::get_logger("MiraculousSystem"),
+      "Cannot read joint positions after enable; refusing to activate.");
+    arm_->disable();
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  for (size_t i = 0; i < joint_names_.size() && i < kArmJoints; ++i) {
+    position_states_[i] = pos[i];
+    position_commands_[i] = pos[i];
   }
   active_ = true;
 

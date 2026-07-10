@@ -216,6 +216,7 @@ public:
     config.baudrate = static_cast<CiaBaudrate_t>(baudrate_);
     config.sync_period_us = sync_period_us_;
     config.read_rate_hz = std::max(frequency_, 100.0);
+    config.enable_emcy_monitor = declare_parameter<bool>("enable_emcy_monitor", true);
     for (size_t i = 0; i < node_ids.size(); ++i) {
       const size_t joint_index = static_cast<size_t>(joint_indices[i]);
       JointConfig jc;

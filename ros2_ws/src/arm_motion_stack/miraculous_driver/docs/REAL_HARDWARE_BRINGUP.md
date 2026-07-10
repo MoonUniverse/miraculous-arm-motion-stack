@@ -24,7 +24,7 @@ export ARM_LIMIT_MIN="MIN_J1,MIN_J2,MIN_J3,MIN_J4,MIN_J5,MIN_J6"
 export ARM_LIMIT_MAX="MAX_J1,MAX_J2,MAX_J3,MAX_J4,MAX_J5,MAX_J6"
 ```
 
-- SDK `_ex` position APIs already use joint/load-side radians, so the ROS driver does not configure or apply a reduction ratio.
+- SDK `_ex` position APIs already use joint/load-side radians. The driver forwards `encoder_bw` / `reduction_ratio` hardware params to the SDK (defaults 19 / 100.0 = SDK defaults); only change them for a different motor model.
 - `ARM_LIMIT_MIN` / `ARM_LIMIT_MAX`: conservative software limits in radians.
 - `0.0,0.0` for a joint disables clamping and should only be used for passive readout.
 - `node_ids` and `joint_indices` must have the same length. `joint_indices` uses ROS slots `0=J1 ... 5=J6`.

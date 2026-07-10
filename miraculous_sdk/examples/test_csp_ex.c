@@ -17,20 +17,20 @@
 #include <unistd.h>
 #include "miraculous_sdk.h"
 
-/* 到位容差 (弧度) */
-#define POSITION_TOLERANCE_RAD  0.02f
+/* 到位容差 (弧度, 对应约 100 inc) */
+#define POSITION_TOLERANCE_RAD  (100.0f * 6.283185307179586f / 524288.0f)
 
 /* 每组内移动次数 */
 #define MOVES_PER_BATCH     10
 
-/* 测试组数（负数表示无限循环，按 Ctrl+C 退出） */
-#define BATCH_COUNT         4
+/* 测试组数 */
+#define BATCH_COUNT         2
 
-/* 每步步进弧度 */
-#define STEP_SIZE_RAD       0.1f
+/* 每步步进弧度 (对应约 582 inc) */
+#define STEP_SIZE_RAD       (6.283185307179586f * 4.0f / 10.0f / 360.0f)
 
 /* 每次下发后等待电机到位的时间 (us) */
-#define SETTLE_TIME_US     10000 /* 10 ms */
+#define SETTLE_TIME_US     15000 /* 10 ms */
 
 /* 速度判零阈值 (脉冲/s) */
 #define VELOCITY_ZERO_THRESHOLD  10
@@ -49,11 +49,13 @@ static void wait_velocity_zero(MiraMotor *motor, int timeout_ms)
     int32_t vel;
     for (int i = 0; i < timeout_ms / 10; i++) {
         if (g_quit) break;
+        miraculous_motor_sync_send(motor);
+        usleep(3000);
         if (miraculous_motor_get_velocity(motor, &vel) == 0) {
             if (vel < 0) vel = -vel;
             if (vel <= VELOCITY_ZERO_THRESHOLD) return;
         }
-        usleep(10000);  /* 10ms 轮询一次 */
+        usleep(7000);
     }
 }
 
@@ -79,18 +81,22 @@ int main(int argc, char **argv)
     uint32_t sync_period_us = SETTLE_TIME_US;
     if (miraculous_motor_csp_init(motor, sync_period_us, manual_sync) < 0) {
         fprintf(stderr, "CSP init failed\n");
-        goto cleanup;
+        goto shutdown;
     }
 
     printf("CSP mode (radian) — SYNC: %s\n", manual_sync ? "MANUAL" : "TIMER 10000 us");
     printf("Settle time = %d us (%d ms)\n", SETTLE_TIME_US, SETTLE_TIME_US / 1000);
     printf("Position tolerance = ±%.3f rad\n\n", POSITION_TOLERANCE_RAD);
 
-    /* --- 读取初始位置 --- */
+    /* --- 发送 SYNC 触发 TPDO, 然后读取初始位置 --- */
+    miraculous_motor_sync_send(motor);
+    usleep(1000);
     float start_rad;
     if (miraculous_motor_get_position_ex(motor, &start_rad, POS_UNIT_RADIAN) < 0) {
+       
         fprintf(stderr, "Failed to read start position\n");
-        goto cleanup;
+        goto shutdown;
+
     }
     printf("Start position: %.4f rad\n\n", start_rad);
 
@@ -105,8 +111,10 @@ int main(int argc, char **argv)
     int passed = 0;
     int failed = 0;
     int move_no = 0;
+    int move_display = 0;
     float direction = 1.0f;        /* 1.0: 正向, -1.0: 反向 */
     float pos_rad;
+    float batch_base = 0;
 
     for (int batch = 0; batch < BATCH_COUNT; batch++) {
         if (g_quit) break;
@@ -116,27 +124,32 @@ int main(int argc, char **argv)
 
         /* 换向时等待速度降为零，再发下一批目标 */
         if (batch > 0) {
-            wait_velocity_zero(motor, 2000);
+            wait_velocity_zero(motor, 20000);
         }
 
         /* 批次开始：读取当前位置作为基准 */
         usleep(200);
-        miraculous_motor_get_position_ex(motor, &pos_rad, POS_UNIT_RADIAN);
-        float batch_base = pos_rad;
+        if (miraculous_motor_get_position_ex(motor, &pos_rad, POS_UNIT_RADIAN) < 0) {
+            pos_rad = batch_base;
+        }
+        batch_base = pos_rad;
 
-        for (int m = 0; m < MOVES_PER_BATCH; m++) {
+        for (int m = 0; m <= MOVES_PER_BATCH; m++) {
             if (g_quit) break;
 
             move_no++;
-            float target_rad = batch_base + direction * STEP_SIZE_RAD * (float)(m + 1);
 
-            /* 以弧度发送目标位置 */
-            int ret = miraculous_motor_csp_set_target_ex(motor, target_rad, POS_UNIT_RADIAN);
-            if (ret < 0) {
-                fprintf(stderr, "CSP set target #%d failed: %s\n",
-                        move_no, mrc_strerror(ret));
-                failed++;
-                continue;
+            /* 最后一次不发目标 */
+            if (m < MOVES_PER_BATCH) {
+                float target_rad = batch_base + direction * STEP_SIZE_RAD * (float)(m + 1);
+
+                int ret = miraculous_motor_csp_set_target_ex(motor, target_rad, POS_UNIT_RADIAN);
+                if (ret < 0) {
+                    fprintf(stderr, "CSP set target #%d failed: %s\n",
+                            move_no, mrc_strerror(ret));
+                    failed++;
+                    continue;
+                }
             }
 
             /* 发送 SYNC 帧, 通知从站锁存目标位置 */
@@ -144,15 +157,23 @@ int main(int argc, char **argv)
 
             usleep(SETTLE_TIME_US);
 
-            /* 读取实际位置 (弧度) */
+            /* 读取实际位置 (本次 SYNC 的位置是上一目标到位后的结果) */
             if (miraculous_motor_get_position_ex(motor, &pos_rad, POS_UNIT_RADIAN) < 0) {
                 fprintf(stderr, "Failed to read position after move #%d\n", move_no);
                 failed++;
                 continue;
             }
 
-            /* 计算差值 */
-            float delta = target_rad - pos_rad;
+            /* 第一次不显示 */
+            if (m == 0) {
+                continue;
+            }
+
+            move_display++;
+
+            /* 用本次位置与上一个目标比较 */
+            float prev_target = batch_base + direction * STEP_SIZE_RAD * (float)m;
+            float delta = prev_target - pos_rad;
 
             const char *status;
             if (delta < 0) delta = -delta;
@@ -165,18 +186,21 @@ int main(int argc, char **argv)
             }
 
             printf(" %3d |   %.4f      |   %.4f      |  %+.4f    | %s\n",
-                   move_no, target_rad, pos_rad, target_rad - pos_rad, status);
+                   move_display, prev_target, pos_rad, prev_target - pos_rad, status);
         }
 
-        /* 批次结束，等待 3s 后打印最终位置并与最后目标比较 */
+        /* 批次结束，发 SYNC 获取最终位置并与最后目标比较 */
         float last_target_rad = batch_base + direction * STEP_SIZE_RAD * (float)MOVES_PER_BATCH;
-        usleep(3000000);
+        sleep(3);
+        miraculous_motor_sync_send(motor);
+        usleep(SETTLE_TIME_US);
         float final_rad;
         if (miraculous_motor_get_position_ex(motor, &final_rad, POS_UNIT_RADIAN) == 0) {
             float delta = last_target_rad - final_rad;
             if (delta < 0) delta = -delta;
-            printf("  Batch %d final: %.4f rad, target: %.4f rad, delta: %.4f\n",
-                   batch + 1, final_rad, last_target_rad, delta);
+            const char *status = (delta <= POSITION_TOLERANCE_RAD) ? "PASS" : "FAIL";
+            printf(" F%-2d |   %.4f      |   %.4f      |  %+.4f    | %s\n",
+                   batch + 1, last_target_rad, final_rad, last_target_rad - final_rad, status);
         }
 
         /* 每组完成后方向取反 */
@@ -199,6 +223,7 @@ int main(int argc, char **argv)
         printf("\n  %d move(s) exceeded tolerance.\n", failed);
     }
 
+shutdown:
     miraculous_motor_shutdown(motor);
 
 cleanup:

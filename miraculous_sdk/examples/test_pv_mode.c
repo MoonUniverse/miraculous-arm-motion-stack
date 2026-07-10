@@ -47,7 +47,7 @@ int main(int argc, char **argv)
         /* 换向安全策略: 先减速到 0, 再切到目标速度 */
         if (target_vel != 0) {
             miraculous_motor_pv_move(motor, 0, acc, dec, profile);
-            usleep(800000);
+            sleep(1);
         }
 
         int ret = miraculous_motor_pv_move(motor, target_vel, acc, dec, profile);
@@ -58,18 +58,11 @@ int main(int argc, char **argv)
 
         printf("Running at %d RPM...\n", target_vel);
 
-        /* 换向后丢弃第一次采样 (TPDO 可能还是旧方向的值) */
-        usleep(100);
-        miraculous_motor_sync_send(motor);
-        miraculous_motor_poll(motor, 5);
         int32_t vel;
-        miraculous_motor_get_velocity(motor, &vel);
-
         /* 每秒读取一次实际速度 */
         for (int i = 0; i < 5 && !g_quit; i++) {
             sleep(1);
             miraculous_motor_sync_send(motor);
-            miraculous_motor_poll(motor, 5);
             if (miraculous_motor_get_velocity(motor, &vel) == 0)
                 printf("  Actual vel = %d RPM\n", vel);
         }

@@ -25,6 +25,7 @@ def generate_launch_description():
     duration = LaunchConfiguration("duration")
     output_file = LaunchConfiguration("output_file")
     settle_time = LaunchConfiguration("settle_time")
+    enable_emcy_monitor = LaunchConfiguration("enable_emcy_monitor")
 
     arm_description_share = get_package_share_directory("arm_description")
     robot_xacro = os.path.join(arm_description_share, "urdf", "arm.urdf.xacro")
@@ -58,6 +59,7 @@ def generate_launch_description():
             "duration": duration,
             "output_file": output_file,
             "settle_time": settle_time,
+            "enable_emcy_monitor": ParameterValue(enable_emcy_monitor, value_type=bool),
         }],
     )
 
@@ -88,6 +90,9 @@ def generate_launch_description():
                               description="CSV output path (empty=auto timestamp)"),
         DeclareLaunchArgument("settle_time", default_value="0.5",
                               description="Settling time before test starts [s]"),
+        DeclareLaunchArgument("enable_emcy_monitor", default_value="true",
+                              description="Register the SDK's dedicated EMCY callback "
+                                          "(motor fault reporting)"),
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
