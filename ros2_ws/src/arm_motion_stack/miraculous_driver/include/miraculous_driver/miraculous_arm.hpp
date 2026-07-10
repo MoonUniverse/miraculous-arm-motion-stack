@@ -165,6 +165,10 @@ private:
   /// cycle because the drive's TPDOs are SYNC-triggered and would otherwise
   /// never update the position cache.
   std::atomic<bool> csp_active_{false};
+  /// Manual CSP writer ownership. While true, set_targets_rad() owns all SDK
+  /// I/O (RPDO, SYNC, poll, feedback cache update) and the read thread sleeps.
+  /// Timer CSP leaves this false because its timerfd is serviced by read_loop().
+  std::atomic<bool> manual_csp_writer_owns_io_{false};
 
   // cached state (mutex protected)
   mutable std::mutex state_mutex_;

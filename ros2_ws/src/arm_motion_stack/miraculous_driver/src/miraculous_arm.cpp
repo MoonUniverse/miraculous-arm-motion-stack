@@ -85,6 +85,7 @@ void MiraculousArm::shutdown()
   stop_read_thread();
   if (initialized_) {
     csp_active_ = false;
+    manual_csp_writer_owns_io_ = false;
     for (auto * motor : motors_) {
       if (motor) {
         // Unregister the EMCY callback first: motor_close frees the shared
@@ -189,6 +190,10 @@ bool MiraculousArm::enable_csp()
         "[miraculous_arm] enable_csp: feedback refresh before seed failed; "
         "trying cached position\n");
     }
+    // From this point through disable/quick-stop, the manual writer owns all
+    // SDK I/O. Publish the transition while holding sdk_mutex_ so read_loop()
+    // cannot slip a poll between the initial feedback refresh and target seed.
+    manual_csp_writer_owns_io_.store(!timer_sync, std::memory_order_release);
   }
   // Seed the CSP controller with the current position to avoid a jump on
   // enable. Refusing to enable without a valid seed is deliberate: the first
@@ -226,21 +231,26 @@ void MiraculousArm::disable()
     return;
   }
   csp_active_ = false;
-  std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
-  // Only one shared SYNC timer is ever started (see enable_csp), stop it once.
-  if (config_.sync_period_us != 0) {
-    for (auto * motor : motors_) {
-      if (motor) {
-        miraculous_motor_sync_stop(motor);
-        break;
+  {
+    std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
+    // Only one shared SYNC timer is ever started (see enable_csp), stop it once.
+    if (config_.sync_period_us != 0) {
+      for (auto * motor : motors_) {
+        if (motor) {
+          miraculous_motor_sync_stop(motor);
+          break;
+        }
+      }
+    }
+    for (const auto & joint : config_.joints) {
+      if (motors_[joint.joint_index]) {
+        miraculous_motor_disable(motors_[joint.joint_index]);
       }
     }
   }
-  for (const auto & joint : config_.joints) {
-    if (motors_[joint.joint_index]) {
-      miraculous_motor_disable(motors_[joint.joint_index]);
-    }
-  }
+  // Keep the read thread out of the SDK until every motor is disabled. Once
+  // released it resumes the inactive-mode SYNC/TPDO feedback path.
+  manual_csp_writer_owns_io_.store(false, std::memory_order_release);
 }
 
 void MiraculousArm::quick_stop()
@@ -249,12 +259,15 @@ void MiraculousArm::quick_stop()
     return;
   }
   csp_active_ = false;
-  std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
-  for (const auto & joint : config_.joints) {
-    if (motors_[joint.joint_index]) {
-      miraculous_motor_quick_stop(motors_[joint.joint_index]);
+  {
+    std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
+    for (const auto & joint : config_.joints) {
+      if (motors_[joint.joint_index]) {
+        miraculous_motor_quick_stop(motors_[joint.joint_index]);
+      }
     }
   }
+  manual_csp_writer_owns_io_.store(false, std::memory_order_release);
 }
 
 bool MiraculousArm::fault_reset()
@@ -468,62 +481,82 @@ void MiraculousArm::read_loop()
 
   while (read_thread_running_) {
     next_wake += period;
+
+    // In active manual CSP, set_targets_rad() performs the complete bus cycle:
+    // RPDO writes, one SYNC, poll, and feedback cache update. Avoid both SDK
+    // contention and an asynchronous overwrite of that cycle's feedback.
+    if (manual_csp_writer_owns_io_.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_until(next_wake);
+      continue;
+    }
+
     const bool poll_state = poll_stateword && (read_tick++ % state_poll_interval) == 0;
     position_ok.fill(false);
+    bool sdk_cycle_completed = false;
 
     {
       std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
-      // The drive's TPDOs are SYNC-triggered: without a SYNC on the bus the
-      // SDK position cache never becomes valid (official examples send a SYNC
-      // before the first read). While CSP is active the write cycle (manual
-      // mode) or the SDK timer (timer mode) already produces SYNC edges and an
-      // extra one here would double-latch targets, so only send when inactive.
-      // Then poll so get_position_ex/get_velocity_ex read the latest cache.
-      for (auto * motor : motors_) {
-        if (motor) {
-          if (!csp_active_) {
-            miraculous_motor_sync_send(motor);
-            miraculous_motor_poll(motor, 1);  // give the SYNC-triggered TPDOs time to arrive
-          } else {
-            miraculous_motor_poll(motor, 0);
+      // Recheck after acquiring the mutex. enable_csp() publishes manual writer
+      // ownership while holding this same mutex, closing the check/lock race.
+      if (!manual_csp_writer_owns_io_.load(std::memory_order_acquire)) {
+        // The drive's TPDOs are SYNC-triggered: without a SYNC on the bus the
+        // SDK position cache never becomes valid (official examples send a SYNC
+        // before the first read). While CSP is active the write cycle (manual
+        // mode) or the SDK timer (timer mode) already produces SYNC edges and an
+        // extra one here would double-latch targets, so only send when inactive.
+        // Then poll so get_position_ex/get_velocity_ex read the latest cache.
+        for (auto * motor : motors_) {
+          if (motor) {
+            if (!csp_active_) {
+              miraculous_motor_sync_send(motor);
+              miraculous_motor_poll(motor, 1);  // allow SYNC-triggered TPDOs to arrive
+            } else {
+              miraculous_motor_poll(motor, 0);
+            }
+            break;
           }
-          break;
         }
+        for (const auto & joint : config_.joints) {
+          const size_t i = joint.joint_index;
+          auto * motor = motors_[i];
+          if (!motor) {
+            continue;
+          }
+          float p_rad = 0.0f;
+          float v_rad_s = 0.0f;
+          const int pret = miraculous_motor_get_position_ex(motor, &p_rad, POS_UNIT_RADIAN);
+          if (pret < 0) {
+            // Rate-limited, with a startup grace: the first SYNC-triggered TPDO
+            // can miss the 1 ms poll window right after bootstrap, so stay quiet
+            // for the first ~0.5 s and only warn on a persistent failure.
+            if (read_fail_streak >= kReadFailWarnStreak &&
+              ((read_fail_streak - kReadFailWarnStreak) % 500) == 0)  // ~every 5 s at 100 Hz
+            {
+              std::fprintf(stderr,
+                "[miraculous_arm] read_loop: get_position_ex failing joint %s node %u: %s (%d) "
+                "(%zu consecutive cycles)\n",
+                joint.name.c_str(), joint.node_id, mrc_strerror(pret), pret, read_fail_streak);
+            }
+            continue;
+          }
+          miraculous_motor_get_velocity_ex(motor, &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
+          if (poll_state) {
+            Cia402State_t s = CIA_STATE_NOT_READY_TO_SWITCH_ON;
+            if (miraculous_motor_get_state(motor, &s) >= 0) {
+              states[i] = s;
+            }
+          }
+          joint_pos_rad[i] = p_rad;
+          joint_vel_rad_s[i] = v_rad_s;
+          position_ok[i] = true;
+        }
+        sdk_cycle_completed = true;
       }
-      for (const auto & joint : config_.joints) {
-        const size_t i = joint.joint_index;
-        auto * motor = motors_[i];
-        if (!motor) {
-          continue;
-        }
-        float p_rad = 0.0f;
-        float v_rad_s = 0.0f;
-        const int pret = miraculous_motor_get_position_ex(motor, &p_rad, POS_UNIT_RADIAN);
-        if (pret < 0) {
-          // Rate-limited, with a startup grace: the first SYNC-triggered TPDO
-          // can miss the 1 ms poll window right after bootstrap, so stay quiet
-          // for the first ~0.5 s and only warn on a persistent failure.
-          if (read_fail_streak >= kReadFailWarnStreak &&
-            ((read_fail_streak - kReadFailWarnStreak) % 500) == 0)  // ~every 5 s at 100 Hz
-          {
-            std::fprintf(stderr,
-              "[miraculous_arm] read_loop: get_position_ex failing joint %s node %u: %s (%d) "
-              "(%zu consecutive cycles)\n",
-              joint.name.c_str(), joint.node_id, mrc_strerror(pret), pret, read_fail_streak);
-          }
-          continue;
-        }
-        miraculous_motor_get_velocity_ex(motor, &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
-        if (poll_state) {
-          Cia402State_t s = CIA_STATE_NOT_READY_TO_SWITCH_ON;
-          if (miraculous_motor_get_state(motor, &s) >= 0) {
-            states[i] = s;
-          }
-        }
-        joint_pos_rad[i] = p_rad;
-        joint_vel_rad_s[i] = v_rad_s;
-        position_ok[i] = true;
-      }
+    }
+
+    if (!sdk_cycle_completed) {
+      std::this_thread::sleep_until(next_wake);
+      continue;
     }
 
     {

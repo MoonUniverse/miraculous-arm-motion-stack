@@ -41,8 +41,10 @@ TrajectoryTrackingTestNode::on_timer() [100Hz 稳态定时器]
     │  1. t = (now - start_time).seconds()
     │  2. command = dc_offset + amplitude × sin(2π × t / period)
     │  3. targets[test_joint] = command  (其他关节 hold 当前位置)
-    │  4. arm_->set_targets_rad(targets)  → csp_set_target ×6 + SYNC
-    │  5. arm_->get_positions_rad(actual) → 从 mutex 缓存读取
+    │  4. arm_->set_targets_rad(targets)
+    │     Manual: csp_set_target ×6 → SYNC → poll TPDO → 更新缓存
+    │     Timer:  csp_set_target ×6，后台 read_loop poll timerfd/TPDO
+    │  5. arm_->get_positions_rad(actual) → 复制最近一次完成的缓存
     │  6. error = command - actual[test_joint]
     │  7. samples_.push_back({t, command, actual, error})
     │  8. ofs_ << CSV row
@@ -50,6 +52,12 @@ TrajectoryTrackingTestNode::on_timer() [100Hz 稳态定时器]
     ▼
 CSV 文件: timestamp, command_rad, actual_rad, error_rad
 ```
+
+Manual CSP 激活期间，`set_targets_rad()` 所在的控制线程独占 SDK I/O，
+后台 `read_loop()` 不再 poll 或覆盖位置缓存。CSP 未激活时，反馈仍由
+`read_loop()` 主动发 SYNC 获取；Timer CSP 下 `read_loop()` 继续 poll timerfd，
+保证 SDK 定时 SYNC 可以发出。Manual CSP 期间后台 `state_poll_rate_hz` 诊断轮询
+也暂停；TPDO/EMCY 由每次写周期内的 poll 处理。
 
 ### 2.2 DC offset (直流偏移)
 
