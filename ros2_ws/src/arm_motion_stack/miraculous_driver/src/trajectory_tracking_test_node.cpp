@@ -210,7 +210,7 @@ public:
       throw std::runtime_error("bad position limits");
     }
 
-    // ---- open motors (init, not enabled) ----
+    // ---- open motors and configure CSP once (power stage remains disabled) ----
     ArmConfig config;
     config.can_interface = can_interface_;
     config.baudrate = static_cast<CiaBaudrate_t>(baudrate_);
@@ -230,7 +230,7 @@ public:
 
     arm_ = std::make_unique<MiraculousArm>();
     if (!arm_->init(config)) {
-      RCLCPP_FATAL(get_logger(), "Failed to open motors.");
+      RCLCPP_FATAL(get_logger(), "Failed to initialize motors or configure CSP.");
       throw std::runtime_error("init failed");
     }
 
@@ -310,8 +310,9 @@ private:
   // ================================================================ test flow
   bool start_test()
   {
-    // Enable CSP.
-    RCLCPP_INFO(get_logger(), "Enabling CSP ...");
+    // CSP was configured once during arm initialization; only enable the power
+    // stage and seed the current position for this run.
+    RCLCPP_INFO(get_logger(), "Enabling CSP power stage ...");
     if (!arm_->enable_csp()) {
       RCLCPP_ERROR(get_logger(), "enable_csp failed.");
       return false;

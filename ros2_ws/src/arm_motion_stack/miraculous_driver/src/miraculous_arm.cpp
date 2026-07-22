@@ -63,6 +63,39 @@ bool MiraculousArm::init(const ArmConfig & config)
         joint.name.c_str(), joint.node_id);
     }
   }
+
+  // CSP is a process-lifetime configuration. Some drives do not tolerate
+  // running csp_init again after a disable/enable cycle, so configure the mode
+  // and SYNC strategy exactly once here. enable_csp() only operates the power
+  // state machine and seeds the current position on each activation.
+  const bool timer_sync = (config_.sync_period_us != 0);
+  for (const auto & joint : config_.joints) {
+    auto * motor = motors_[joint.joint_index];
+    if (miraculous_motor_set_mode(motor, CIA_MODE_CSP) < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] init: set CSP mode failed joint %s\n",
+        joint.name.c_str());
+      for (auto *& opened_motor : motors_) {
+        if (opened_motor) {
+          miraculous_motor_close(opened_motor);
+          opened_motor = nullptr;
+        }
+      }
+      return false;
+    }
+    if (miraculous_motor_csp_init(motor, config_.sync_period_us, !timer_sync) < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] init: csp_init failed joint %s\n",
+        joint.name.c_str());
+      for (auto *& opened_motor : motors_) {
+        if (opened_motor) {
+          miraculous_motor_close(opened_motor);
+          opened_motor = nullptr;
+        }
+      }
+      return false;
+    }
+  }
   passive_ = false;
   initialized_ = true;
   start_read_thread();
@@ -157,30 +190,15 @@ bool MiraculousArm::enable_csp()
   if (!initialized_) {
     return false;
   }
-  // Bootstrap (NMT Operational) is already done in init(); here we only enable
-  // the power stage and switch to CSP.
+  // Bootstrap, CSP mode, and csp_init are process-lifetime setup performed by
+  // init(). A start/stop cycle must never re-run that configuration.
   const bool timer_sync = (config_.sync_period_us != 0);
   {
     std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
     for (const auto & joint : config_.joints) {
       auto * motor = motors_[joint.joint_index];
-      if (miraculous_motor_set_mode(motor, CIA_MODE_CSP) < 0) {
-        std::fprintf(stderr, "[miraculous_arm] enable_csp: set CSP mode failed joint %s\n",
-          joint.name.c_str());
-        return false;
-      }
       if (miraculous_motor_full_enable(motor) < 0) {
         std::fprintf(stderr, "[miraculous_arm] enable_csp: enable failed joint %s\n",
-          joint.name.c_str());
-        return false;
-      }
-      // PDO mappings are factory-preconfigured (EDS); csp_init only selects the
-      // SYNC strategy. In timer mode it writes the node's 0x1006 comm cycle
-      // period and (re)arms the per-bus shared SYNC timer, so calling it per
-      // motor is idempotent — one timer, no SYNC storm. In manual mode the
-      // period is ignored and the write cycle provides the SYNC edges.
-      if (miraculous_motor_csp_init(motor, config_.sync_period_us, !timer_sync) < 0) {
-        std::fprintf(stderr, "[miraculous_arm] enable_csp: csp_init failed joint %s\n",
           joint.name.c_str());
         return false;
       }
@@ -233,15 +251,8 @@ void MiraculousArm::disable()
   csp_active_ = false;
   {
     std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
-    // Only one shared SYNC timer is ever started (see enable_csp), stop it once.
-    if (config_.sync_period_us != 0) {
-      for (auto * motor : motors_) {
-        if (motor) {
-          miraculous_motor_sync_stop(motor);
-          break;
-        }
-      }
-    }
+    // Keep the process-lifetime CSP/SYNC configuration intact so the next
+    // enable_csp() can start without calling csp_init again.
     for (const auto & joint : config_.joints) {
       if (motors_[joint.joint_index]) {
         miraculous_motor_disable(motors_[joint.joint_index]);
@@ -378,7 +389,7 @@ bool MiraculousArm::refresh_feedback_locked(bool send_sync, int poll_timeout_ms)
     return false;
   }
 
-  miraculous_motor_poll(sync_motor, poll_timeout_ms);
+  // miraculous_motor_poll(sync_motor, poll_timeout_ms);
 
   std::array<double, kArmJoints> refreshed_pos{};
   std::array<double, kArmJoints> refreshed_vel{};
@@ -503,15 +514,24 @@ void MiraculousArm::read_loop()
         // SDK position cache never becomes valid (official examples send a SYNC
         // before the first read). While CSP is active the write cycle (manual
         // mode) or the SDK timer (timer mode) already produces SYNC edges and an
-        // extra one here would double-latch targets, so only send when inactive.
-        // Then poll so get_position_ex/get_velocity_ex read the latest cache.
+        // extra one here would double-latch targets. In timer mode csp_init()
+        // starts the process-lifetime timer during init(), including while the
+        // drive is disabled, so inactive reads only need an explicit SYNC in
+        // manual mode. Then poll so get_position_ex/get_velocity_ex read the
+        // latest cache and timerfd events are serviced.
         for (auto * motor : motors_) {
           if (motor) {
-            if (!csp_active_) {
+            if (!csp_active_ && config_.sync_period_us == 0) {
               miraculous_motor_sync_send(motor);
-              miraculous_motor_poll(motor, 1);  // allow SYNC-triggered TPDOs to arrive
+              // const double timestamp_s = std::chrono::duration<double>(
+              //   std::chrono::system_clock::now().time_since_epoch()).count();
+              // std::fprintf(stderr,
+              //   "[%.6f] !csp_active_ && config_.sync_period_us == 0:"
+              //   "miraculous_motor_sync_send\n",
+              //   timestamp_s);
+              //miraculous_motor_poll(motor, 1);  // allow SYNC-triggered TPDOs to arrive
             } else {
-              miraculous_motor_poll(motor, 0);
+              //miraculous_motor_poll(motor, 0);
             }
             break;
           }
@@ -525,6 +545,9 @@ void MiraculousArm::read_loop()
           float p_rad = 0.0f;
           float v_rad_s = 0.0f;
           const int pret = miraculous_motor_get_position_ex(motor, &p_rad, POS_UNIT_RADIAN);
+          std::fprintf(stderr,
+            "[miraculous_arm] read_loop: get_position_ex joint %s node %u: %s (%d)\n",
+            joint.name.c_str(), joint.node_id, mrc_strerror(pret), pret);
           if (pret < 0) {
             // Rate-limited, with a startup grace: the first SYNC-triggered TPDO
             // can miss the 1 ms poll window right after bootstrap, so stay quiet
@@ -546,6 +569,7 @@ void MiraculousArm::read_loop()
               states[i] = s;
             }
           }
+
           joint_pos_rad[i] = p_rad;
           joint_vel_rad_s[i] = v_rad_s;
           position_ok[i] = true;

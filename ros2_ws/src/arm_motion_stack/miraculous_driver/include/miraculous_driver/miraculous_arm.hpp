@@ -79,13 +79,13 @@ public:
 
   // ---- lifecycle -----------------------------------------------------------
 
-  /// Open 6 motors without enabling. Starts the
-  /// background read thread. Returns false on any open failure (opened motors
-  /// are closed automatically).
+  /// Open motors, bootstrap CANopen, and configure CSP mode/SYNC exactly once
+  /// without enabling the power stage. Starts the background read thread.
+  /// Returns false on any open or CSP configuration failure.
   bool init(const ArmConfig & config);
 
-  /// Passive (teach) mode: open + bootstrap motors so NMT is Operational and
-  /// encoder values are readable, but motors are NOT enabled (free to drag).
+  /// Passive (teach) mode: initialize the bus/CSP configuration and keep the
+  /// motors NOT enabled so encoder values are readable while free to drag.
   bool init_passive(const ArmConfig & config);
 
   /// Stop the read thread, disable and close all motors. Safe to call once.
@@ -96,11 +96,10 @@ public:
 
   // ---- PDS state machine ---------------------------------------------------
 
-  /// set_mode(CSP) + full_enable + csp_init for configured motors (bootstrap is
-  /// done in init()). Seeds the CSP targets with the current position; fails if
-  /// that position cannot be read, so a successful return guarantees the arm
-  /// holds its pose. After this the arm follows set_targets_rad() each write
-  /// cycle.
+  /// Enable the configured motors and seed CSP targets with the current
+  /// position. CSP mode and csp_init are process-lifetime setup done once by
+  /// init(); repeated enable/disable cycles never reconfigure them. Fails if the
+  /// seed position cannot be read, so success guarantees the arm holds its pose.
   bool enable_csp();
 
   /// Enable all motors (without switching to CSP). Rarely needed directly.
@@ -159,11 +158,9 @@ private:
 
   bool initialized_{false};
   bool passive_{false};
-  /// True while CSP is enabled: the SYNC source is then the write cycle
-  /// (manual mode) or the SDK timer (timer mode), so the read thread must not
-  /// inject extra SYNC edges. While false, the read thread sends one SYNC per
-  /// cycle because the drive's TPDOs are SYNC-triggered and would otherwise
-  /// never update the position cache.
+  /// True while CSP is enabled. Manual mode gets SYNC from the write cycle and
+  /// inactive manual mode from the read thread. Timer mode is configured once
+  /// in init() and remains running until shutdown(), including while disabled.
   std::atomic<bool> csp_active_{false};
   /// Manual CSP writer ownership. While true, set_targets_rad() owns all SDK
   /// I/O (RPDO, SYNC, poll, feedback cache update) and the read thread sleeps.

@@ -110,6 +110,18 @@ ros2 topic pub --once /arm_controller/joint_trajectory \
 ros2 launch miraculous_driver trajectory_test.launch.py sync_period_us:=0
 ```
 
+同一 launch 进程内执行两轮 start/stop：
+
+```bash
+ros2 service call /trajectory_test/start std_srvs/srv/Trigger
+ros2 service call /trajectory_test/stop std_srvs/srv/Trigger
+ros2 service call /trajectory_test/start std_srvs/srv/Trigger
+ros2 service call /trajectory_test/stop std_srvs/srv/Trigger
+```
+
+- **通过标准**：`set CSP mode` / `csp init` 相关输出只在节点 launch 初始化阶段出现；
+  两次 `/start` 都能正常运行，start 日志只包含 power-stage enable 和当前位置 seed。
+
 ## 步骤 6：EMCY 与故障路径（覆盖改动 5）
 
 按电机工程师在 `test_emcy_callback` 里用过的方式触发一次可控故障（如过载/限流）：
@@ -150,7 +162,6 @@ ros2 launch miraculous_driver real_control.launch.py node_ids:=1 joint_indices:=
 
 ## 已知的观察项（非阻塞，测试时顺带记录）
 
-- csp_init 之前反馈走 SDO（100 Hz × 6 关节 ≈ 1200 SDO/s），1 Mbps 总线理论够用；
-  六轴时留意 controller_manager 是否报 write/read 超时；
+- `csp_init` 现在只在进程启动时执行一次；重复 start/stop 时留意日志中是否仍有重复初始化；
 - 各关节零点/方向假设已在电机侧用 `set_zero_position` 对好（URDF 零位 = 电机零位），
   如有方向相反的关节，目前驱动层没有 per-joint 符号翻转，需要反馈后再加。

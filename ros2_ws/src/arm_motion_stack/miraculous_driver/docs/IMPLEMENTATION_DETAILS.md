@@ -1,6 +1,6 @@
 # miraculous_driver 实现文档
 
-> 日期: 2026-06-22 (2026-07-07 更新: 对照 test_csp_ex 审查修复, 见第 9 节)
+> 日期: 2026-06-22 (2026-07-13 更新: CSP 初始化生命周期修复, 见第 11 节)
 > 状态: 构建通过 (x86_64 开发机), 待真实 CAN 总线测试
 
 ---
@@ -147,10 +147,11 @@ read() 调用方 (ros2_control / teach / playback)
 ### 3.3 CSP 多轴同步策略
 
 ```cpp
-// enable_csp() 中 (2026-07-07 起):
-for (i = 0..5) miraculous_motor_csp_init(motor[i], period, /*manual=*/true);  // 只配 PDO
-if (sync_period_us != 0)
-  miraculous_motor_sync_start(motor[0], sync_period_us);  // 全臂共享一个 SYNC 定时器
+// init() 中，每个进程只执行一次:
+for (i = 0..5) {
+  miraculous_motor_set_mode(motor[i], CIA_MODE_CSP);
+  miraculous_motor_csp_init(motor[i], period, /*manual=*/period == 0);
+}
 
 // set_targets_rad() 中, manual SYNC 模式:
 for (i = 0..5) miraculous_motor_csp_set_target_ex(motor[i], target_rad, POS_UNIT_RADIAN);
@@ -158,7 +159,8 @@ miraculous_motor_sync_send(motor[0]);  // 统一 SYNC
 ```
 
 - `sync_period_us == 0` 时使用手动 SYNC，wrapper 在 6 个目标全部写入后调用 SDK 的 `miraculous_motor_sync_send()`
-- `sync_period_us != 0` 时由**第一个电机句柄上唯一一个** SDK 定时器发 SYNC（csp_init 一律 `manual=true`，避免每个句柄各启一个定时器造成 SYNC 风暴），`disable()`/`shutdown()` 时 `sync_stop` 一次
+- `sync_period_us != 0` 时 `csp_init()` 在 `init()` 中配置 SDK 的共享定时器；该定时器跨 start/stop 保留，只在 `shutdown()` 停止
+- `enable_csp()` 不再调用 `set_mode()` 或 `csp_init()`，因此连续 start 不会重复配置 CSP
 - 状态字 `0x6041` 通过 SDO 读取，默认不在读线程轮询；需要诊断状态机时再设置 `state_poll_rate_hz > 0`
 
 ### 3.4 单位语义
@@ -168,18 +170,18 @@ ROS command/state、CSV 记录、轨迹测试参数以及 SDK `_ex` position API
 ### 3.5 生命周期
 
 ```
-init()           open_motors ×6 → bootstrap ×6 → start_read_thread
-                 (NMT Operational, 不使能, 编码器可读)
+init()           open_motors ×6 → bootstrap ×6 → set_mode(CSP) ×6
+                 → csp_init ×6（每进程一次）→ start_read_thread
+                 (NMT Operational, CSP 已配置但不使能, 编码器可读)
 
 init_passive()   = init() + passive_=true
                  (示教模式, 电机去使能可自由拖动)
 
-enable_csp()     set_mode(CSP) ×6 → full_enable ×6 → csp_init(manual=true) ×6
-                 → (timer 模式: sync_start ×1, 全臂共享)
+enable_csp()     full_enable ×6
                  → seed 当前位置 (防跳变; 读不到位置则失败并回退 disable)
                  passive_ = false
 
-disable()        (timer 模式: sync_stop ×1) → motor_disable ×6
+disable()        motor_disable ×6（保留 CSP/SYNC 配置供下次 start 使用）
                  (Operation Enabled → Switched On)
 
 quick_stop()     motor_quick_stop ×6 (急停减速)
@@ -284,16 +286,15 @@ class MiraculousArm {
 | `miraculous_motor_set_reduction_ratio` | `open_motors()` | 下发减速比 (默认 100.0) |
 | `miraculous_motor_bootstrap` | `init()` | NMT Reset → Operational |
 | `miraculous_motor_full_enable` | `enable_csp()` / `enable()` | PDS → Operation Enabled |
-| `miraculous_motor_set_mode` | `enable_csp()` | 设为 CIA_MODE_CSP |
-| `miraculous_motor_csp_init` | `enable_csp()` | 一律 `manual=true` (只配 PDO, 不启定时器) |
-| `miraculous_motor_sync_start` | `enable_csp()` | timer 模式下仅在第一个电机上启动一次 |
+| `miraculous_motor_set_mode` | `init()` | 每进程一次，设为 CIA_MODE_CSP |
+| `miraculous_motor_csp_init` | `init()` | 每进程每关节一次，配置 manual/timer SYNC 策略 |
 | `miraculous_motor_csp_set_target_ex` | `set_targets_rad()` | 写入目标位置 (关节输出侧 rad) |
 | `miraculous_motor_get_position_ex` | `read_loop()` | 读取实际位置 (关节输出侧 rad) |
 | `miraculous_motor_get_velocity_ex` | `read_loop()` | 读取实际速度 (负载侧 rad/s) |
 | `miraculous_motor_get_state` | `read_loop()` | 读取 PDS 状态 |
 | `miraculous_motor_poll` | `read_loop()` | 处理 CAN 事件 (TPDO/EMCY 等) |
-| `miraculous_motor_sync_send` | `send_sync()` / `read_loop()`(CSP 未激活时) / `refresh_feedback_locked()` | 发送手动 SYNC（TPDO 为 SYNC 触发） |
-| `miraculous_motor_sync_stop` | `disable()` / `shutdown()` | 停止共享 SDK 定时 SYNC (一次) |
+| `miraculous_motor_sync_send` | `send_sync()` / `read_loop()`(manual 且 CSP 未激活时) / `refresh_feedback_locked()` | 发送手动 SYNC（TPDO 为 SYNC 触发） |
+| `miraculous_motor_sync_stop` | `shutdown()` | 进程退出时停止共享 SDK 定时 SYNC |
 | `miraculous_motor_set_emcy_callback` | `open_motors()` / `shutdown()` | 注册/注销 EMCY 回调（按总线一次） |
 | `miraculous_motor_disable` | `disable()` | PDS → Switched On |
 | `miraculous_motor_quick_stop` | `quick_stop()` | 急停 |
@@ -631,13 +632,28 @@ SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接�
 - enable 后（manual 模式）：SYNC 频率应变为 write 周期频率且只有一路
 - 故障注入：EMCY 应经专用回调上报（ROS 日志 + `has_fault`），位置反馈不受影响
 
-## 11. 待办事项
+## 11. 2026-07-13 CSP 初始化生命周期修复
+
+板测确认电机不接受每次 start 都重新执行 CSP 初始化。从本次修改起，CSP 配置与
+进程生命周期绑定：
+
+- `MiraculousArm::init()` 在 bootstrap 后执行一次 `set_mode(CSP)` 和
+  `csp_init()`；任一关节配置失败则关闭全部句柄并让节点启动失败。
+- `enable_csp()` 只执行 `full_enable()`、刷新反馈和当前位置 seed。
+- `disable()` 只退出 Operation Enabled，不再停止或重建 CSP/SYNC 配置。
+- timer SYNC 从 `init()` 保持到 `shutdown()`；manual SYNC 仍由 active 写周期发送，
+  inactive 时由读线程发送以维持 TPDO 位置反馈。
+
+因此同一进程内连续执行 start → stop → start 时，第二次 start 不包含
+`set_mode()`/`csp_init()`。板上应检查 `csp init` 日志只在 launch 阶段出现一次。
+
+## 12. 待办事项
 
 - [ ] 在 `config/miraculous_arm_params.yaml` 和 xacro/launch 中填入保守 `position_min` / `position_max` 软件限位
 - [ ] 在 ARM 目标机上用真实 CAN 总线进行端到端测试
 - [x] ~~`csp_set_target` 是否自动发 SYNC~~ — 2026-07-07 审查确认不自动发：`test_csp_ex.c:134-143` 在 set_target 后显式调用 `sync_send`
 - [x] ~~验证 SDK 风险项：`get_position` 是 SDO 还是 TPDO 缓存~~ — 2026-07-08 读源码确认：
-  纯 TPDO 缓存、无 SDO 回退，且 TPDO 为 SYNC 触发；读线程已改为 CSP 未激活时主动发 SYNC（见第 10 节）
+  纯 TPDO 缓存、无 SDO 回退，且 TPDO 为 SYNC 触发；manual 模式未激活时由读线程主动发 SYNC（见第 11 节）
 - [ ] 按 [BOARD_TEST_CHECKLIST.md](BOARD_TEST_CHECKLIST.md) 完成 2026-07-07 修复的板上验证
 - [ ] 如有装反方向的关节，driver 需增加 per-joint 符号翻转 (当前假设 URDF 零位/方向 = 电机侧)
 - [ ] 补充真实关节速度/加速度/effort 限位 (当前 URDF 为 0)
@@ -646,7 +662,7 @@ SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接�
 
 ---
 
-## 12. 文件索引
+## 13. 文件索引
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
