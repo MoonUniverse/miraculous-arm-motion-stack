@@ -2,19 +2,20 @@
 
 > 日期: 2026-06-22
 > 组件: `miraculous_driver / trajectory_tracking_test_node`
-> 状态: 构建通过, 第一阶段推荐按小幅单轴流程测试
+> 状态: 支持单轴及多轴同相同步测试, 上板时仍建议从小幅单轴开始
 
 ---
 
 ## 1. 功能概述
 
-`trajectory_tracking_test_node` 是一个 ROS 2 测试节点, 用于验证单个电机在 CSP (周期同步位置) 模式下对正弦/余弦轨迹的跟踪精度。
+`trajectory_tracking_test_node` 是一个 ROS 2 测试节点, 用于验证一个或多个电机在 CSP (周期同步位置) 模式下对正弦/余弦轨迹的跟踪精度。
 
 ### 核心能力
 
-- 以指定频率 (默认 100Hz) 下发 sin/cos 位置命令到单个关节
+- 以指定频率 (默认 100Hz) 向选定关节下发同相 sin/cos 位置命令
+- 同一周期先写入所有已配置电机目标, 再通过一帧广播 SYNC 同步锁存
 - 同步记录每一步的 **命令值** 和 **编码器实际值**, 保证时间对齐
-- 自动计算跟踪精度指标: RMSE、MAE、最大误差、相关系数、相位滞后
+- 为每个测试关节分别计算 RMSE、MAE、最大误差、相关系数、相位滞后
 - 输出 CSV 文件, 可用配套 Python 脚本绘图和分析
 - 通过 ROS 2 Service 控制启动/停止, 支持自动定时停止
 
@@ -39,18 +40,21 @@
 TrajectoryTrackingTestNode::on_timer() [100Hz 稳态定时器]
     │
     │  1. t = (now - start_time).seconds()
-    │  2. command = dc_offset + amplitude × sin(2π × t / period)
-    │  3. targets[test_joint] = command  (其他关节 hold 当前位置)
+    │  2. waveform = sin(2π × t / period)
+    │  3. 对每个 test_joint:
+    │       targets[joint] = dc_offset[joint] + amplitude × waveform
+    │     其他关节 hold 当前位置
     │  4. arm_->set_targets_rad(targets)
-    │     Manual: csp_set_target ×6 → SYNC → poll TPDO → 更新缓存
+    │     Manual: 各电机 csp_set_target → 一帧广播 SYNC → 更新缓存
     │     Timer:  csp_set_target ×6，后台 read_loop poll timerfd/TPDO
     │  5. arm_->get_positions_rad(actual) → 复制最近一次完成的缓存
-    │  6. error = command - actual[test_joint]
+    │  6. 分别计算每个测试关节的 command - actual
     │  7. samples_.push_back({t, command, actual, error})
     │  8. ofs_ << CSV row
     │
     ▼
-CSV 文件: timestamp, command_rad, actual_rad, error_rad
+单轴 CSV: timestamp,command_rad,actual_rad,error_rad
+多轴 CSV: timestamp,J1_command_rad,J1_actual_rad,J1_error_rad,...
 ```
 
 Manual CSP 激活期间，`set_targets_rad()` 所在的控制线程独占 SDK I/O，
@@ -64,8 +68,8 @@ Manual CSP 激活期间，`set_targets_rad()` 所在的控制线程独占 SDK I/
 测试不以零位为基准, 而以使能后编码器的当前位置为基准:
 
 ```
-dc_offset = get_positions_rad()[test_joint]  // 使能并 settle 后的静止位置
-command(t) = dc_offset + amplitude × waveform(t)
+dc_offset[joint] = get_positions_rad()[joint]  // 使能并 settle 后的静止位置
+command[joint](t) = dc_offset[joint] + amplitude × waveform(t)
 ```
 
 这避免了电机启动时突然跳到零位的危险。
@@ -75,8 +79,9 @@ command(t) = dc_offset + amplitude × waveform(t)
 非测试关节不跟随轨迹, 而是保持其当前编码器位置 (hold position):
 
 ```cpp
-for (i = 0..5) {
-    targets[i] = (i == test_joint) ? command : current_position[i];
+targets = current_position;
+for (joint : test_joints) {
+    targets[joint] = command[joint];
 }
 ```
 
@@ -131,7 +136,8 @@ for (i = 0..5) {
 | `period` | double | `6.0` | 一个完整周期 [s] |
 | `frequency` | double | `100.0` | 命令下发频率 [Hz] |
 | `waveform` | string | `sin` | 波形类型: `sin` 或 `cos` |
-| `test_joint` | int | `0` | 测试关节索引: 0=J1, 1=J2, ..., 5=J6 |
+| `test_joint` | int | `0` | 兼容参数: 单个测试关节索引, `test_joints` 为空时生效 |
+| `test_joints` | string | `""` | 多关节索引, 例如 `0,1` 表示 J1/J2 同相同步测试 |
 | `duration` | double | `3.0` | 自动停止时间 [s] (0=手动) |
 | `settle_time` | double | `0.5` | 使能后等待稳定时间 [s] |
 
@@ -189,6 +195,23 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py
   amplitude:=0.03 \
   period:=6.0 \
   duration:=3.0
+
+# J1/J2 同相同步正弦测试:
+ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
+  can_interface:=can1 \
+  baudrate:=0 \
+  node_ids:=1,2 \
+  joint_indices:=0,1 \
+  position_min:=-0.5,-0.5 \
+  position_max:=0.5,0.5 \
+  test_joints:="0,1" \
+  waveform:=sin \
+  amplitude:=0.1 \
+  period:=6.0 \
+  frequency:=50.0 \
+  duration:=12.0 \
+  sync_period_us:=0 \
+  output_file:=/tmp/j1_j2_sin_tracking.csv
 ```
 
 ### 5.3 开始测试
@@ -346,6 +369,8 @@ ros2 launch miraculous_driver trajectory_test.launch.py \
 
 ## 7. CSV 文件格式
 
+单关节测试继续使用原格式:
+
 ```csv
 timestamp,command_rad,actual_rad,error_rad
 0.000,0.000000,0.000123,-0.000123
@@ -363,13 +388,20 @@ timestamp,command_rad,actual_rad,error_rad
 - `actual_rad`: 编码器读取的实际位置 [rad]
 - `error_rad`: 命令 − 实际 [rad]
 
+多关节测试按关节展开三列, 例如 J1/J2:
+
+```csv
+timestamp,J1_command_rad,J1_actual_rad,J1_error_rad,J2_command_rad,J2_actual_rad,J2_error_rad
+0.000,0.100000,0.099800,0.000200,-0.200000,-0.200300,0.000300
+```
+
 ---
 
 ## 8. 扩展方向
 
-当前框架专注于单关节 sin/cos 测试, 可扩展:
+当前框架支持多个关节共享同相、同幅值 sin/cos 测试, 可扩展:
 
-1. **多关节同时测试** — 所有关节跟随各自 sin 曲线 (不同相位)
+1. **独立轨迹参数** — 为各关节分别设置幅值、周期和相位
 2. **更多波形** — 三角波、方波、S 曲线 (STEP响应)、Chirp (扫频)
 3. **频响分析 (Bode)** — 自动化扫频测试, 绘制幅频/相频特性曲线
 4. **STEP 响应测试** — 阶跃信号, 分析上升时间、超调、稳态误差

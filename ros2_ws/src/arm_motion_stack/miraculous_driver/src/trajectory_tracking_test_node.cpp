@@ -1,9 +1,9 @@
 /**
  * @file trajectory_tracking_test_node.cpp
- * @brief Single-joint sinusoidal trajectory tracking test for CSP mode.
+ * @brief Multi-joint sinusoidal trajectory tracking test for CSP mode.
  *
- * Sends a sine/cosine position command to one joint at a fixed rate, while
- * synchronously recording the commanded target and the actual encoder reading.
+ * Sends the same-phase sine/cosine position command to selected joints at a
+ * fixed rate, while recording each commanded target and encoder reading.
  * At the end, saves a CSV file and prints tracking accuracy metrics (RMSE,
  * MAE, max error, correlation).
  *
@@ -54,6 +54,22 @@ std::vector<int> parse_int_list(const std::string & s, const std::vector<int> & 
   return out.empty() ? def : out;
 }
 
+bool parse_int_list_strict(const std::string & s, std::vector<int> & out)
+{
+  std::stringstream ss(s);
+  std::string tok;
+  while (std::getline(ss, tok, ',')) {
+    std::stringstream token_stream(tok);
+    int value = 0;
+    char extra = '\0';
+    if (!(token_stream >> value) || (token_stream >> extra)) {
+      return false;
+    }
+    out.push_back(value);
+  }
+  return !out.empty();
+}
+
 std::vector<int> default_joint_indices(size_t size)
 {
   std::vector<int> out;
@@ -62,6 +78,18 @@ std::vector<int> default_joint_indices(size_t size)
     out.push_back(static_cast<int>(i));
   }
   return out;
+}
+
+std::string format_joint_names(const std::vector<size_t> & indices)
+{
+  std::ostringstream out;
+  for (size_t i = 0; i < indices.size(); ++i) {
+    if (i > 0) {
+      out << ",";
+    }
+    out << "J" << indices[i] + 1;
+  }
+  return out.str();
 }
 
 bool validate_joint_indices(const std::vector<int> & indices)
@@ -128,13 +156,13 @@ std::string default_filename()
   return std::string(buf);
 }
 
-/// Single recorded sample.
+/// One synchronized sample for all selected joints.
 struct Sample
 {
-  double timestamp;     ///< seconds since test start
-  double command_rad;   ///< commanded target position [rad]
-  double actual_rad;    ///< actual encoder position [rad]
-  double error_rad;     ///< command - actual [rad]
+  double timestamp{};                                      ///< seconds since test start
+  std::array<double, kArmJoints> command_rad{};             ///< commanded targets [rad]
+  std::array<double, kArmJoints> actual_rad{};              ///< encoder positions [rad]
+  std::array<double, kArmJoints> error_rad{};               ///< command - actual [rad]
 };
 
 }  // namespace
@@ -163,8 +191,9 @@ public:
     period_ = declare_parameter<double>("period", 6.0);               // [s]
     frequency_ = declare_parameter<double>("frequency", 100.0);        // [Hz]
     waveform_ = declare_parameter<std::string>("waveform", "sin");    // "sin"|"cos"
-    test_joint_ = static_cast<size_t>(
-      declare_parameter<int>("test_joint", 0));                       // 0=J1..5=J6
+    const int legacy_test_joint = declare_parameter<int>("test_joint", 0);
+    const std::string test_joints_str =
+      declare_parameter<std::string>("test_joints", "");
     duration_ = declare_parameter<double>("duration", 3.0);            // 0 = manual
     output_file_ = declare_parameter<std::string>("output_file", "");
     joint_states_topic_ =
@@ -172,10 +201,20 @@ public:
     settle_time_ = declare_parameter<double>("settle_time", 0.5);      // [s]
 
     // ---- validate ----
-    if (test_joint_ >= kArmJoints) {
+    std::vector<int> requested_test_joints;
+    if (test_joints_str.empty()) {
+      requested_test_joints.push_back(legacy_test_joint);
+    } else if (!parse_int_list_strict(test_joints_str, requested_test_joints)) {
+      RCLCPP_FATAL(get_logger(), "test_joints must be a comma-separated integer list");
+      throw std::runtime_error("bad test_joints");
+    }
+    if (requested_test_joints.empty() || !validate_joint_indices(requested_test_joints)) {
       RCLCPP_FATAL(get_logger(),
-        "test_joint must be 0..%zu, got %zu", kArmJoints - 1, test_joint_);
-      throw std::runtime_error("bad test_joint");
+        "test_joint/test_joints must list unique values in range 0..%zu", kArmJoints - 1);
+      throw std::runtime_error("bad test_joints");
+    }
+    for (const int index : requested_test_joints) {
+      test_joints_.push_back(static_cast<size_t>(index));
     }
 
     auto node_ids = parse_int_list(node_ids_str, {1, 2, 3, 4, 5, 6});
@@ -194,12 +233,15 @@ public:
         node_ids.size(), kArmJoints - 1);
       throw std::runtime_error("bad joint_indices");
     }
-    if (std::find(joint_indices.begin(), joint_indices.end(), static_cast<int>(test_joint_)) ==
-      joint_indices.end())
-    {
-      RCLCPP_FATAL(get_logger(),
-        "test_joint=%zu is not listed in joint_indices.", test_joint_);
-      throw std::runtime_error("inactive test_joint");
+    for (const size_t test_joint : test_joints_) {
+      if (std::find(
+          joint_indices.begin(), joint_indices.end(), static_cast<int>(test_joint)) ==
+        joint_indices.end())
+      {
+        RCLCPP_FATAL(get_logger(),
+          "test joint J%zu is not listed in joint_indices.", test_joint + 1);
+        throw std::runtime_error("inactive test_joint");
+      }
     }
     if (!valid_limit_size(position_min, node_ids.size()) ||
       !valid_limit_size(position_max, node_ids.size()))
@@ -259,9 +301,10 @@ public:
       std::bind(&TrajectoryTrackingTestNode::publish_state, this));
 
     RCLCPP_INFO(get_logger(),
-      "Trajectory tracking test ready. joint=J%zu waveform=%s amp=%.3f period=%.1f "
+      "Trajectory tracking test ready. joints=%s waveform=%s amp=%.3f period=%.1f "
       "freq=%.0f sync_period_us=%u",
-      test_joint_ + 1, waveform_.c_str(), amplitude_, period_, frequency_, sync_period_us_);
+      format_joint_names(test_joints_).c_str(), waveform_.c_str(),
+      amplitude_, period_, frequency_, sync_period_us_);
     RCLCPP_INFO(get_logger(),
       "Call: ros2 service call /trajectory_test/start std_srvs/srv/Trigger");
   }
@@ -332,9 +375,11 @@ private:
       arm_->disable();
       return false;
     }
-    dc_offset_ = cur[test_joint_];
-    RCLCPP_INFO(get_logger(), "DC offset (current J%zu pos) = %.6f rad",
-      test_joint_ + 1, dc_offset_);
+    for (const size_t joint : test_joints_) {
+      dc_offsets_[joint] = cur[joint];
+      RCLCPP_INFO(get_logger(), "DC offset (current J%zu pos) = %.6f rad",
+        joint + 1, dc_offsets_[joint]);
+    }
 
     // Open output file.
     current_file_ = output_file_.empty() ? default_filename() : output_file_;
@@ -344,7 +389,18 @@ private:
       arm_->disable();
       return false;
     }
-    ofs_ << "timestamp,command_rad,actual_rad,error_rad\n";
+    if (test_joints_.size() == 1) {
+      ofs_ << "timestamp,command_rad,actual_rad,error_rad\n";
+    } else {
+      ofs_ << "timestamp";
+      for (const size_t joint : test_joints_) {
+        const std::string name = "J" + std::to_string(joint + 1);
+        ofs_ << "," << name << "_command_rad"
+             << "," << name << "_actual_rad"
+             << "," << name << "_error_rad";
+      }
+      ofs_ << "\n";
+    }
     ofs_.precision(9);
     ofs_ << std::fixed;
 
@@ -411,16 +467,18 @@ private:
     } else {
       waveform_val = std::sin(omega * t);
     }
-    const double command = dc_offset_ + amplitude_ * waveform_val;
-
-    // Build target array: test joint follows trajectory, others hold position.
+    // Build all selected targets from the same timestamp. set_targets_rad()
+    // writes every configured RPDO before emitting one shared manual SYNC.
     std::array<double, kArmJoints> targets{};
-    {
-      std::array<double, kArmJoints> cur{};
-      arm_->get_positions_rad(cur);
-      for (size_t i = 0; i < kArmJoints; ++i) {
-        targets[i] = (i == test_joint_) ? command : cur[i];
-      }
+    if (!arm_->get_positions_rad(targets)) {
+      RCLCPP_ERROR(get_logger(), "No valid feedback at t=%.3f, stopping test.", t);
+      stop_test();
+      return;
+    }
+    std::array<double, kArmJoints> commands{};
+    for (const size_t joint : test_joints_) {
+      commands[joint] = dc_offsets_[joint] + amplitude_ * waveform_val;
+      targets[joint] = commands[joint];
     }
     if (!arm_->set_targets_rad(targets)) {
       RCLCPP_ERROR(get_logger(), "Failed to send CSP target at t=%.3f, stopping test.", t);
@@ -430,15 +488,30 @@ private:
 
     // Read actual position (use the cached value from the background thread).
     std::array<double, kArmJoints> actual{};
-    arm_->get_positions_rad(actual);
-    const double actual_j = actual[test_joint_];
-    const double error = command - actual_j;
+    if (!arm_->get_positions_rad(actual)) {
+      RCLCPP_ERROR(get_logger(), "No valid feedback after target at t=%.3f, stopping test.", t);
+      stop_test();
+      return;
+    }
 
     // Record sample.
-    samples_.push_back({t, command, actual_j, error});
+    Sample sample;
+    sample.timestamp = t;
+    for (const size_t joint : test_joints_) {
+      sample.command_rad[joint] = commands[joint];
+      sample.actual_rad[joint] = actual[joint];
+      sample.error_rad[joint] = commands[joint] - actual[joint];
+    }
+    samples_.push_back(sample);
 
     // Write to CSV.
-    ofs_ << t << "," << command << "," << actual_j << "," << error << "\n";
+    ofs_ << t;
+    for (const size_t joint : test_joints_) {
+      ofs_ << "," << sample.command_rad[joint]
+           << "," << sample.actual_rad[joint]
+           << "," << sample.error_rad[joint];
+    }
+    ofs_ << "\n";
 
     // Fault check.
     if (fault_flag_) {
@@ -451,6 +524,25 @@ private:
   void print_metrics() const
   {
     const size_t n = samples_.size();
+    RCLCPP_INFO(get_logger(), "========================================");
+    RCLCPP_INFO(get_logger(), "  Trajectory Tracking Results");
+    RCLCPP_INFO(get_logger(), "========================================");
+    RCLCPP_INFO(get_logger(), "  Samples:       %zu", n);
+    RCLCPP_INFO(get_logger(), "  Duration:      %.3f s", samples_.back().timestamp);
+
+    for (const size_t joint : test_joints_) {
+      print_joint_metrics(joint);
+    }
+
+    RCLCPP_INFO(get_logger(), "  CSV file:       %s", current_file_.c_str());
+    RCLCPP_INFO(get_logger(), "========================================");
+    RCLCPP_INFO(get_logger(), "Plot with:");
+    RCLCPP_INFO(get_logger(), "  python3 plot_trajectory.py %s", current_file_.c_str());
+  }
+
+  void print_joint_metrics(size_t joint) const
+  {
+    const size_t n = samples_.size();
     double sum_sq_err = 0.0;
     double sum_abs_err = 0.0;
     double max_abs_err = 0.0;
@@ -459,33 +551,35 @@ private:
     double sum_cmd_act = 0.0;
     double sum_cmd_sq = 0.0;
     double sum_act_sq = 0.0;
-    double min_cmd = samples_.front().command_rad;
-    double max_cmd = samples_.front().command_rad;
-    double min_act = samples_.front().actual_rad;
-    double max_act = samples_.front().actual_rad;
+    double min_cmd = samples_.front().command_rad[joint];
+    double max_cmd = samples_.front().command_rad[joint];
+    double min_act = samples_.front().actual_rad[joint];
+    double max_act = samples_.front().actual_rad[joint];
 
     for (const auto & s : samples_) {
-      const double e = s.error_rad;
+      const double command = s.command_rad[joint];
+      const double actual = s.actual_rad[joint];
+      const double e = s.error_rad[joint];
       const double ae = std::abs(e);
       sum_sq_err += e * e;
       sum_abs_err += ae;
       if (ae > max_abs_err) {
         max_abs_err = ae;
       }
-      sum_cmd += s.command_rad;
-      sum_act += s.actual_rad;
-      sum_cmd_act += s.command_rad * s.actual_rad;
-      sum_cmd_sq += s.command_rad * s.command_rad;
-      sum_act_sq += s.actual_rad * s.actual_rad;
-      min_cmd = std::min(min_cmd, s.command_rad);
-      max_cmd = std::max(max_cmd, s.command_rad);
-      min_act = std::min(min_act, s.actual_rad);
-      max_act = std::max(max_act, s.actual_rad);
+      sum_cmd += command;
+      sum_act += actual;
+      sum_cmd_act += command * actual;
+      sum_cmd_sq += command * command;
+      sum_act_sq += actual * actual;
+      min_cmd = std::min(min_cmd, command);
+      max_cmd = std::max(max_cmd, command);
+      min_act = std::min(min_act, actual);
+      max_act = std::max(max_act, actual);
     }
 
     const double rmse = std::sqrt(sum_sq_err / n);
     const double mae = sum_abs_err / n;
-    const double lag = estimate_lag();
+    const double lag = estimate_lag(joint);
 
     // Pearson correlation coefficient.
     const double mean_cmd = sum_cmd / n;
@@ -498,11 +592,7 @@ private:
         ? cov / std::sqrt(var_cmd * var_act)
         : 0.0;
 
-    RCLCPP_INFO(get_logger(), "========================================");
-    RCLCPP_INFO(get_logger(), "  Trajectory Tracking Results");
-    RCLCPP_INFO(get_logger(), "========================================");
-    RCLCPP_INFO(get_logger(), "  Samples:       %zu", n);
-    RCLCPP_INFO(get_logger(), "  Duration:      %.3f s", samples_.back().timestamp);
+    RCLCPP_INFO(get_logger(), "  -- J%zu --", joint + 1);
     RCLCPP_INFO(get_logger(), "  Command range: %.6f .. %.6f rad",
       min_cmd, max_cmd);
     RCLCPP_INFO(get_logger(), "  Actual range:  %.6f .. %.6f rad",
@@ -518,14 +608,10 @@ private:
       RCLCPP_INFO(get_logger(), "  Est. lag:      %.1f ms  (%.1f deg phase)",
         lag * 1000.0, lag * 360.0 / period_);
     }
-    RCLCPP_INFO(get_logger(), "  CSV file:       %s", current_file_.c_str());
-    RCLCPP_INFO(get_logger(), "========================================");
-    RCLCPP_INFO(get_logger(), "Plot with:");
-    RCLCPP_INFO(get_logger(), "  python3 plot_trajectory.py %s", current_file_.c_str());
   }
 
   /// Estimate the phase lag by cross-correlating command and actual.
-  double estimate_lag() const
+  double estimate_lag(size_t joint) const
   {
     const size_t n = samples_.size();
     if (n < 10) {
@@ -534,6 +620,9 @@ private:
 
     // Use the first full period of data.
     const double dt = samples_[1].timestamp - samples_[0].timestamp;
+    if (std::abs(dt) < 1e-9) {
+      return -1.0;
+    }
     const size_t period_samples =
       static_cast<size_t>(period_ / std::abs(dt));
     const size_t search_len = std::min(period_samples, n / 2);
@@ -545,7 +634,7 @@ private:
       double sum = 0.0;
       size_t count = 0;
       for (size_t i = 0; i + shift < n; ++i) {
-        sum += samples_[i].command_rad * samples_[i + shift].actual_rad;
+        sum += samples_[i].command_rad[joint] * samples_[i + shift].actual_rad[joint];
         ++count;
       }
       if (count > 0 && sum / count > best_corr) {
@@ -585,14 +674,14 @@ private:
   double period_{5.0};
   double frequency_{100.0};
   std::string waveform_{"sin"};
-  size_t test_joint_{0};
+  std::vector<size_t> test_joints_;
   double duration_{0.0};
   double settle_time_{0.5};
   std::string output_file_;
 
   // ---- state ----
   std::unique_ptr<MiraculousArm> arm_;
-  double dc_offset_{0.0};
+  std::array<double, kArmJoints> dc_offsets_{};
   bool running_{false};
   bool fault_flag_{false};
 

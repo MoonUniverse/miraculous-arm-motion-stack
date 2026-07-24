@@ -22,6 +22,7 @@ def generate_launch_description():
     frequency = LaunchConfiguration("frequency")
     waveform = LaunchConfiguration("waveform")
     test_joint = LaunchConfiguration("test_joint")
+    test_joints = LaunchConfiguration("test_joints")
     duration = LaunchConfiguration("duration")
     output_file = LaunchConfiguration("output_file")
     settle_time = LaunchConfiguration("settle_time")
@@ -56,6 +57,7 @@ def generate_launch_description():
             "frequency": frequency,
             "waveform": waveform,
             "test_joint": test_joint,
+            "test_joints": ParameterValue(test_joints, value_type=str),
             "duration": duration,
             "output_file": output_file,
             "settle_time": settle_time,
@@ -83,7 +85,10 @@ def generate_launch_description():
         DeclareLaunchArgument("waveform", default_value="sin",
                               description="Waveform: 'sin' or 'cos'"),
         DeclareLaunchArgument("test_joint", default_value="0",
-                              description="Joint index 0=J1..5=J6"),
+                              description="Legacy single joint index 0=J1..5=J6"),
+        DeclareLaunchArgument("test_joints", default_value="",
+                              description="Comma-separated synchronized test joints; "
+                                          "empty uses test_joint"),
         DeclareLaunchArgument("duration", default_value="3.0",
                               description="Auto-stop after N seconds (0=manual)"),
         DeclareLaunchArgument("output_file", default_value="",

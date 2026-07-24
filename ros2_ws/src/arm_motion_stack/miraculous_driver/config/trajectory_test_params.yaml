@@ -22,7 +22,8 @@ trajectory_test:
     period: 6.0             # [s]   one full cycle
     frequency: 100.0        # [Hz]  command update rate
     waveform: "sin"         # "sin" or "cos"
-    test_joint: 0           # 0=J1, 1=J2, ..., 5=J6
+    test_joint: 0           # Legacy single-joint selection, used when test_joints is empty.
+    test_joints: ""         # Comma-separated synchronized joints, e.g. "0,1" for J1/J2.
     duration: 3.0           # [s] auto-stop (0 = manual via service)
     settle_time: 0.5        # [s] wait before starting trajectory
 
