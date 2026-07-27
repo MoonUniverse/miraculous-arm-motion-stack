@@ -1,6 +1,6 @@
 # miraculous_driver 实现文档
 
-> 日期: 2026-06-22 (2026-07-13 更新: CSP 初始化生命周期修复, 见第 11 节)
+> 日期: 2026-06-22 (2026-07-27 更新: 示教 V2 与首点安全回放)
 > 状态: 构建通过 (x86_64 开发机), 待真实 CAN 总线测试
 
 ---
@@ -10,7 +10,9 @@
 `miraculous_driver` 是在 `miraculous_sdk`（CANopen/CiA402 电机驱动 C SDK）之上封装的 ROS 2 包, 为 ARM 6DOF 机械臂 (J1–J6) 提供两个能力:
 
 1. **MoveIt 集成** — 实现 `miraculous_driver/MiraculousSystem` ros2_control 硬件插件, 通过 `hardware_type:=real` 接入现有 `arm_controller` (JointTrajectoryController) + `joint_state_broadcaster` + MoveIt 规划栈。
-2. **示教/回放** — 电机去使能自由拖动示教, 实时记录 6 关节编码器角度到 CSV, 再按记录速率 CSP 回放。
+2. **示教/回放** — 示教时发送 `shutdown(0x0006)` 并校验
+   `Ready to Switch On`，按一次 SYNC 对齐多个关节的新鲜反馈并写入 V2 CSV。
+   playback 支持 V2 关节列映射，并先从当前位置平滑插补到 CSV 首点再正式回放。
 
 真机第一阶段上机流程见：
 
@@ -128,7 +130,7 @@ MiraculousArm (C++ wrapper)
 CAN 总线 → 6 个电机
 ```
 
-### 3.2 后台读取线程
+### 3.2 主动控制后台读取线程
 
 ```
 MiraculousArm::read_loop() [独立线程, 100Hz]
@@ -140,9 +142,14 @@ MiraculousArm::read_loop() [独立线程, 100Hz]
     │    5. mutex lock → 缓存更新 (joint-side rad + load-side rad/s)
     │    6. sleep_until(next_period)
     ▼
-read() 调用方 (ros2_control / teach / playback)
+read() 调用方 (ros2_control / playback)
     → mutex lock → 拷贝缓存 (非阻塞)
 ```
+
+`init_passive()` 不启动该线程。示教节点的 wall timer 直接调用
+`read_passive_feedback()`：清空旧待处理帧、记录各节点 TPDO2 generation、发送一帧
+广播 SYNC，并等待所有配置节点 generation 递增后才返回完整样本。超时不会把旧缓存
+当作新样本。
 
 ### 3.3 CSP 多轴同步策略
 
@@ -174,8 +181,9 @@ init()           open_motors ×6 → bootstrap ×6 → set_mode(CSP) ×6
                  → csp_init ×6（每进程一次）→ start_read_thread
                  (NMT Operational, CSP 已配置但不使能, 编码器可读)
 
-init_passive()   = init() + passive_=true
-                 (示教模式, 电机去使能可自由拖动)
+init_passive()   open_motors ×N → bootstrap ×N → motor_shutdown(0x0006) ×N
+                 → wait_state(Ready to Switch On) ×N
+                 (不配置 CSP, 不启动 read_loop)
 
 enable_csp()     full_enable ×6
                  → seed 当前位置 (防跳变; 读不到位置则失败并回退 disable)
@@ -188,8 +196,9 @@ quick_stop()     motor_quick_stop ×6 (急停减速)
 
 fault_reset()    motor_fault_reset ×6 → fault_detected_ = false
 
-shutdown()       stop_read_thread → 注销 EMCY 回调 → (timer 模式: sync_stop ×1)
-                 → motor_shutdown ×6 → motor_close ×6
+shutdown()       stop_read_thread → 注销 TPDO/EMCY 回调 → (timer 模式: sync_stop ×1)
+                 → active: motor_shutdown ×N / passive: disable_voltage ×N
+                 → motor_close ×N
 ```
 
 ### 3.6 EMCY 检测
@@ -334,6 +343,9 @@ class MiraculousArm {
 | `record_rate` | `50.0` | 录制频率 (Hz) |
 | `output_file` | `""` (自动时间戳) | CSV 输出路径 |
 | `auto_record` | `false` | 启动即开始录制 |
+| `feedback_timeout_ms` | `2` | 每次 SYNC 等待全部配置节点新 TPDO2 的超时 |
+| `max_consecutive_misses` | `10` | 连续超时达到该值时终止当前录制 |
+| `overwrite_existing` | `false` | 是否允许覆盖显式 `output_file` |
 
 ### 5.3 playback_node 参数
 
@@ -349,6 +361,10 @@ class MiraculousArm {
 | `input_file` | `""` | 回放 CSV 路径 |
 | `speed_scale` | `1.0` | 回放速度倍率 |
 | `loop` | `false` | 循环回放 |
+| `approach_velocity_rad_s` | `0.1` | 当前位置到 CSV 首点过渡的最大关节速度 |
+| `approach_rate_hz` | `50.0` | 首点过渡命令频率 |
+| `approach_min_duration_s` | `0.5` | 首点过渡最短时间 |
+| `start_tolerance_rad` | `0.005` | 与首点差值低于该值时跳过长过渡 |
 
 ---
 
@@ -440,8 +456,11 @@ ros2 launch miraculous_driver real_control.launch.py
 ### 7.3 示教记录
 
 ```bash
-# 启动 (电机去使能, 可自由拖动)
-ros2 launch miraculous_driver teach.launch.py
+# 启动 (shutdown 0x0006, Ready to Switch On, 可自由拖动)
+ros2 launch miraculous_driver teach.launch.py \
+  node_ids:=1,3 \
+  joint_indices:=0,2 \
+  output_file:=/tmp/teach_j1_j3_v2.csv
 
 # 开始录制
 ros2 service call /teach_record/start std_srvs/srv/Trigger
@@ -452,17 +471,29 @@ ros2 service call /teach_record/stop std_srvs/srv/Trigger
 
 CSV 格式:
 ```csv
-timestamp,J1,J2,J3,J4,J5,J6
-0.000000000,0.100000000,0.050000000,...
-0.020000000,0.120000000,0.060000000,...
+timestamp,sample_index,J1,J3
+0.000000000,0,0.100000000,0.050000000
+0.040000000,2,0.120000000,0.060000000
 ```
+
+`timestamp` 以第一行对应的 SYNC 时刻为零点并使用 steady clock；
+`sample_index` 是本轮录制的采样尝试序号，示例中缺少 `1` 表示该周期未收齐全部节点。
+每行只包含本次配置的关节，并且只有全部关节都返回新 TPDO2 才写入。当前
+`playback_node` 会解析 V2 header；CSV 中出现未配置关节、非有限位置、非递增时间或
+越过软件限位时会拒绝回放。
 
 ### 7.4 回放
 
 ```bash
 # 启动
 ros2 launch miraculous_driver playback.launch.py \
-  input_file:="teach_20260622_140000.csv"
+  node_ids:=1,3 \
+  joint_indices:=0,2 \
+  position_min:=-0.5,-0.5 \
+  position_max:=0.5,0.5 \
+  input_file:=/tmp/teach_j1_j3_v2.csv \
+  approach_velocity_rad_s:=0.1 \
+  approach_rate_hz:=50.0
 
 # 开始回放
 ros2 service call /playback/play std_srvs/srv/Trigger
@@ -470,6 +501,11 @@ ros2 service call /playback/play std_srvs/srv/Trigger
 # 停止回放
 ros2 service call /playback/stop std_srvs/srv/Trigger
 ```
+
+`/playback/play` 首先确认当前位置与全部 CSV 点都在软件限位内，然后
+`enable_csp()` seed 当前姿态。当前位置到首点使用五次 minimum-jerk 曲线，过渡时间
+满足 `T >= 1.875 * max_joint_delta / approach_velocity_rad_s`；过渡完成后重新设置
+steady-clock 零点并按 CSV timestamp 回放。V2 未记录但已配置的关节保持当前位置。
 
 ---
 
@@ -616,7 +652,7 @@ SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接�
 | # | 修改 | 文件 |
 |---|------|------|
 | 1 | EMCY 改用 SDK 专用接口 `miraculous_motor_set_emcy_callback`（按总线注册一次，回调带 node_id），彻底移除 `miraculous_can_set_recv_callback` 及 `can_ctx_`/`can_recv_trampoline` | `miraculous_arm.{hpp,cpp}` |
-| 2 | 读线程在 **CSP 未激活**时（`csp_active_` 原子标志）每周期先发一帧 SYNC 再 poll(1ms)，使能前/示教模式反馈由此而来；CSP 激活后 SYNC 由 write 周期（manual）或 SDK 定时器（timer）提供，读线程不再注入额外 SYNC，避免同一目标被双重锁存干扰插补 | `miraculous_arm.{hpp,cpp}` |
+| 2 | 主动控制对象在 **CSP 未激活**时由读线程发送 SYNC 维持反馈；被动示教不再使用读线程，而由 `read_passive_feedback()` 对每轮 SYNC 后各节点的新 TPDO2 做 generation 校验 | `miraculous_arm.{hpp,cpp}` |
 | 3 | `enable_csp()` 简化：新 `csp_init` 中 PDO 为出厂预配、timer 模式写各节点 0x1006 并（重)启**共享** master 定时器（幂等，无 SYNC 风暴），因此直接按模式传 `manual = (sync_period_us==0)`，删除"全部 manual + 首电机 sync_start"的旧规避 | `miraculous_arm.cpp` |
 | 4 | CMakeLists：默认 SDK 路径改为 `../../../../miraculous_sdk`，`find_library` 兼容 `build/lib/`（源码构建）与 `lib/`（安装布局），找不到时提示先构建 SDK；仅当链接 .so 时才安装它 | `CMakeLists.txt` |
 
@@ -627,8 +663,10 @@ SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接�
 ### 10.3 板上验证要点
 
 - 编译前先构建 SDK：`cmake -S miraculous_sdk -B miraculous_sdk/build && cmake --build miraculous_sdk/build`
-- 不使能启动（示教/仅 configure）：`/joint_states` 应立即有读数（读线程 SYNC 生效），
-  `candump can1,080:7FF` 应看到 read_rate_hz 频率的 SYNC
+- 被动示教启动：所有节点必须先通过 `shutdown(0x0006)` 验证为
+  `Ready to Switch On`，随后
+  `/joint_states` 才开始发布；`candump` 应看到 record_rate 频率的单路 SYNC，
+  每轮后跟每个配置节点的 TPDO2
 - enable 后（manual 模式）：SYNC 频率应变为 write 周期频率且只有一路
 - 故障注入：EMCY 应经专用回调上报（ROS 日志 + `has_fault`），位置反馈不受影响
 
@@ -642,7 +680,7 @@ SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接�
 - `enable_csp()` 只执行 `full_enable()`、刷新反馈和当前位置 seed。
 - `disable()` 只退出 Operation Enabled，不再停止或重建 CSP/SYNC 配置。
 - timer SYNC 从 `init()` 保持到 `shutdown()`；manual SYNC 仍由 active 写周期发送，
-  inactive 时由读线程发送以维持 TPDO 位置反馈。
+  inactive 主动对象由读线程维持反馈。被动示教走独立的单定时器同步采样路径。
 
 因此同一进程内连续执行 start → stop → start 时，第二次 start 不包含
 `set_mode()`/`csp_init()`。板上应检查 `csp init` 日志只在 launch 阶段出现一次。

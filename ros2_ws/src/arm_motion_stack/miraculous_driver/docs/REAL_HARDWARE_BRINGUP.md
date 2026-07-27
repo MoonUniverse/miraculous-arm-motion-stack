@@ -53,7 +53,11 @@ ip -details link show can0
 
 ## 4. Read-Only Encoder Check
 
-This starts passive teach mode. Motors are opened/bootstraped for encoder reads but not enabled.
+This starts passive teach mode. Every configured drive is opened/bootstraped,
+commanded with `miraculous_motor_shutdown()` (controlword `0x0006`), and
+verified in `Ready to Switch On`
+before the node reports ready. The teach path does not configure CSP or start
+the arm background read thread.
 
 ```bash
 cd /home/alienware/Documents/PersonalProject/ros2_ws
@@ -63,6 +67,10 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver teach.launch.py \
   can_interface:=can0 \
   node_ids:=1,2,3,4,5,6 \
   joint_indices:=0,1,2,3,4,5 \
+  record_rate:=50.0 \
+  feedback_timeout_ms:=2 \
+  max_consecutive_misses:=10 \
+  output_file:=/tmp/teach_v2.csv \
   auto_record:=false
 ```
 
@@ -76,10 +84,13 @@ ros2 topic echo /arm_joint_states
 
 Pass criteria:
 
-- `/arm_joint_states` publishes `J1` through `J6`.
+- The startup log confirms all configured drives are `Ready to Switch On`.
+- `/arm_joint_states` publishes exactly the configured joints.
 - Dragging each joint changes the expected joint value.
 - The sign and approximate magnitude are explainable before enabling CSP.
 - No EMCY/fault messages appear.
+- `candump` shows one broadcast SYNC per acquisition cycle followed by one
+  TPDO2 from every configured node.
 
 Optional recording:
 
@@ -87,6 +98,13 @@ Optional recording:
 ros2 service call /teach_record/start std_srvs/srv/Trigger
 ros2 service call /teach_record/stop std_srvs/srv/Trigger
 ```
+
+The V2 CSV header is `timestamp,sample_index,<configured joints>`, for example
+`timestamp,sample_index,J1,J3`. A row is written only after both configured
+nodes return fresh TPDO2 feedback. A gap in `sample_index` records a missed
+acquisition. Playback accepts this V2 joint mapping and first moves from the
+current pose to the recorded first point with a velocity-limited minimum-jerk
+transition before starting the recorded timestamps.
 
 ## 5. Single-Joint CSP Test
 

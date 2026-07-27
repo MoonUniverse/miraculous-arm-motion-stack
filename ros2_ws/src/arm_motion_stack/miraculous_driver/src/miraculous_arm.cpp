@@ -12,12 +12,54 @@ MiraculousArm::MiraculousArm()
   for (size_t i = 0; i < kArmJoints; ++i) {
     motors_[i] = nullptr;
     cached_states_[i] = CIA_STATE_NOT_READY_TO_SWITCH_ON;
+    tpdo2_generation_[i].store(0, std::memory_order_relaxed);
   }
 }
 
 MiraculousArm::~MiraculousArm()
 {
   shutdown();
+}
+
+bool MiraculousArm::validate_config(const ArmConfig & config, const char * caller) const
+{
+  if (config.joints.empty() || config.joints.size() > kArmJoints) {
+    std::fprintf(stderr,
+      "[miraculous_arm] %s: expected 1..%zu configured joints, got %zu\n",
+      caller, kArmJoints, config.joints.size());
+    return false;
+  }
+  std::array<bool, kArmJoints> seen{};
+  std::array<bool, 128> seen_node_ids{};
+  for (const auto & joint : config.joints) {
+    if (joint.joint_index >= kArmJoints) {
+      std::fprintf(stderr,
+        "[miraculous_arm] %s: joint %s has invalid joint_index=%zu\n",
+        caller, joint.name.c_str(), joint.joint_index);
+      return false;
+    }
+    if (joint.node_id == 0 || joint.node_id > 127) {
+      std::fprintf(stderr,
+        "[miraculous_arm] %s: joint %s has invalid node_id=%u\n",
+        caller, joint.name.c_str(), joint.node_id);
+      return false;
+    }
+    if (seen_node_ids[joint.node_id]) {
+      std::fprintf(stderr,
+        "[miraculous_arm] %s: duplicate node_id=%u\n",
+        caller, joint.node_id);
+      return false;
+    }
+    if (seen[joint.joint_index]) {
+      std::fprintf(stderr,
+        "[miraculous_arm] %s: duplicate joint_index=%zu\n",
+        caller, joint.joint_index);
+      return false;
+    }
+    seen[joint.joint_index] = true;
+    seen_node_ids[joint.node_id] = true;
+  }
+  return true;
 }
 
 // ============================ lifecycle ====================================
@@ -28,27 +70,8 @@ bool MiraculousArm::init(const ArmConfig & config)
     return true;
   }
   config_ = config;
-  if (config_.joints.empty() || config_.joints.size() > kArmJoints) {
-    std::fprintf(stderr,
-      "[miraculous_arm] init: expected 1..%zu configured joints, got %zu\n",
-      kArmJoints, config_.joints.size());
+  if (!validate_config(config_, "init")) {
     return false;
-  }
-  std::array<bool, kArmJoints> seen{};
-  for (const auto & joint : config_.joints) {
-    if (joint.joint_index >= kArmJoints) {
-      std::fprintf(stderr,
-        "[miraculous_arm] init: joint %s has invalid joint_index=%zu\n",
-        joint.name.c_str(), joint.joint_index);
-      return false;
-    }
-    if (seen[joint.joint_index]) {
-      std::fprintf(stderr,
-        "[miraculous_arm] init: duplicate joint_index=%zu\n",
-        joint.joint_index);
-      return false;
-    }
-    seen[joint.joint_index] = true;
   }
   if (!open_motors()) {
     return false;
@@ -75,24 +98,14 @@ bool MiraculousArm::init(const ArmConfig & config)
       std::fprintf(stderr,
         "[miraculous_arm] init: set CSP mode failed joint %s\n",
         joint.name.c_str());
-      for (auto *& opened_motor : motors_) {
-        if (opened_motor) {
-          miraculous_motor_close(opened_motor);
-          opened_motor = nullptr;
-        }
-      }
+      close_motors(false);
       return false;
     }
     if (miraculous_motor_csp_init(motor, config_.sync_period_us, !timer_sync) < 0) {
       std::fprintf(stderr,
         "[miraculous_arm] init: csp_init failed joint %s\n",
         joint.name.c_str());
-      for (auto *& opened_motor : motors_) {
-        if (opened_motor) {
-          miraculous_motor_close(opened_motor);
-          opened_motor = nullptr;
-        }
-      }
+      close_motors(false);
       return false;
     }
   }
@@ -104,12 +117,44 @@ bool MiraculousArm::init(const ArmConfig & config)
 
 bool MiraculousArm::init_passive(const ArmConfig & config)
 {
-  // init() already bootstraps (NMT Operational) without enabling the power
-  // stage, so motors are free to drag. Just mark the passive flag.
-  if (!init(config)) {
+  if (initialized_) {
+    return passive_;
+  }
+  config_ = config;
+  if (!validate_config(config_, "init_passive")) {
     return false;
   }
+  if (config_.sync_period_us != 0) {
+    std::fprintf(stderr,
+      "[miraculous_arm] init_passive: sync_period_us must be 0 for explicit samples\n");
+    return false;
+  }
+  if (!open_motors()) {
+    return false;
+  }
+
+  // Passive teach mode has a deliberately separate lifecycle from CSP. NMT is
+  // brought Operational for PDO traffic, but no operation mode or CSP setup is
+  // written to the drive.
+  for (const auto & joint : config_.joints) {
+    if (miraculous_motor_bootstrap(motors_[joint.joint_index], 3000) < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] init_passive: bootstrap failed for joint %s (node %u)\n",
+        joint.name.c_str(), joint.node_id);
+      close_motors(true);
+      return false;
+    }
+  }
+  if (!enter_passive_ready_locked(1000)) {
+    std::fprintf(stderr,
+      "[miraculous_arm] init_passive: failed to verify Ready to Switch On\n");
+    close_motors(true);
+    return false;
+  }
+
   passive_ = true;
+  initialized_ = true;
+  passive_sample_sequence_ = 0;
   return true;
 }
 
@@ -119,24 +164,20 @@ void MiraculousArm::shutdown()
   if (initialized_) {
     csp_active_ = false;
     manual_csp_writer_owns_io_ = false;
-    for (auto * motor : motors_) {
-      if (motor) {
-        // Unregister the EMCY callback first: motor_close frees the shared
-        // CANopen master, and a late EMCY frame must not call back into this
-        // object. The SYNC timer is shared per bus, one stop suffices.
-        miraculous_motor_set_emcy_callback(motor, nullptr, nullptr);
-        if (config_.sync_period_us != 0) {
-          miraculous_motor_sync_stop(motor);
+    {
+      std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
+      if (passive_) {
+        // Do not send Shutdown (0x0006) here: it can leave Switch On Disabled.
+        // Passive mode must remain at controlword 0x0000 until handles close.
+        disable_voltage_locked(1000);
+      } else {
+        for (auto * motor : motors_) {
+          if (motor) {
+            miraculous_motor_shutdown(motor);
+          }
         }
-        break;
       }
-    }
-    for (auto *& motor : motors_) {
-      if (motor) {
-        miraculous_motor_shutdown(motor);
-        miraculous_motor_close(motor);
-        motor = nullptr;
-      }
+      close_motors(false);
     }
     initialized_ = false;
     passive_ = false;
@@ -153,12 +194,7 @@ bool MiraculousArm::open_motors()
       std::fprintf(stderr,
         "[miraculous_arm] open: failed to open joint %s (node %u) on %s\n",
         joint.name.c_str(), joint.node_id, config_.can_interface.c_str());
-      for (auto *& motor : motors_) {
-        if (motor) {
-          miraculous_motor_close(motor);
-          motor = nullptr;
-        }
-      }
+      close_motors(false);
       return false;
     }
     // Radian/velocity conversion parameters used by the _ex APIs. Defaults
@@ -166,6 +202,8 @@ bool MiraculousArm::open_motors()
     miraculous_motor_set_encoder_bw(motors_[joint.joint_index], config_.encoder_bw);
     miraculous_motor_set_reduction_ratio(
       motors_[joint.joint_index], static_cast<float>(config_.reduction_ratio));
+    miraculous_motor_set_tpdo_callback(
+      motors_[joint.joint_index], &MiraculousArm::tpdo_trampoline, this);
   }
   // EMCY monitoring via the SDK's dedicated per-bus dispatcher. Registering on
   // one motor covers every node on the interface (the callback receives the
@@ -181,6 +219,35 @@ bool MiraculousArm::open_motors()
     }
   }
   return true;
+}
+
+void MiraculousArm::close_motors(bool force_disable_voltage)
+{
+  if (force_disable_voltage) {
+    disable_voltage_locked(1000);
+  }
+
+  for (auto * motor : motors_) {
+    if (motor) {
+      // EMCY is registered bus-wide, so clearing it once covers this interface.
+      miraculous_motor_set_emcy_callback(motor, nullptr, nullptr);
+      if (config_.sync_period_us != 0) {
+        miraculous_motor_sync_stop(motor);
+      }
+      break;
+    }
+  }
+  for (auto * motor : motors_) {
+    if (motor) {
+      miraculous_motor_set_tpdo_callback(motor, nullptr, nullptr);
+    }
+  }
+  for (auto *& motor : motors_) {
+    if (motor) {
+      miraculous_motor_close(motor);
+      motor = nullptr;
+    }
+  }
 }
 
 // ============================ PDS state machine ============================
@@ -264,6 +331,114 @@ void MiraculousArm::disable()
   manual_csp_writer_owns_io_.store(false, std::memory_order_release);
 }
 
+bool MiraculousArm::disable_voltage_locked(int timeout_ms)
+{
+  bool ok = true;
+  for (const auto & joint : config_.joints) {
+    auto * motor = motors_[joint.joint_index];
+    if (motor && miraculous_motor_disable_voltage(motor) < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] disable_voltage: command failed joint %s node %u\n",
+        joint.name.c_str(), joint.node_id);
+      ok = false;
+    }
+  }
+
+  for (const auto & joint : config_.joints) {
+    auto * motor = motors_[joint.joint_index];
+    if (!motor) {
+      ok = false;
+      continue;
+    }
+    const int ret = miraculous_motor_wait_state(
+      motor, CIA_STATE_SWITCH_ON_DISABLED, timeout_ms);
+    if (ret < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] disable_voltage: state verification failed joint %s "
+        "node %u: %s (%d)\n",
+        joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
+      ok = false;
+      continue;
+    }
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    cached_states_[joint.joint_index] = CIA_STATE_SWITCH_ON_DISABLED;
+  }
+  return ok;
+}
+
+bool MiraculousArm::enter_passive_ready_locked(int timeout_ms)
+{
+  bool ok = true;
+  for (const auto & joint : config_.joints) {
+    auto * motor = motors_[joint.joint_index];
+    if (!motor || miraculous_motor_shutdown(motor) < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] passive shutdown: command failed joint %s node %u\n",
+        joint.name.c_str(), joint.node_id);
+      ok = false;
+    }
+  }
+
+  for (const auto & joint : config_.joints) {
+    auto * motor = motors_[joint.joint_index];
+    if (!motor) {
+      ok = false;
+      continue;
+    }
+    const int ret = miraculous_motor_wait_state(
+      motor, CIA_STATE_READY_TO_SWITCH_ON, timeout_ms);
+    if (ret < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] passive shutdown: state verification failed joint %s "
+        "node %u: %s (%d)\n",
+        joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
+      ok = false;
+      continue;
+    }
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    cached_states_[joint.joint_index] = CIA_STATE_READY_TO_SWITCH_ON;
+  }
+  return ok;
+}
+
+bool MiraculousArm::verify_passive_ready_locked()
+{
+  bool ready = true;
+  for (const auto & joint : config_.joints) {
+    auto * motor = motors_[joint.joint_index];
+    Cia402State_t state = CIA_STATE_NOT_READY_TO_SWITCH_ON;
+    const int ret = motor ? miraculous_motor_get_state(motor, &state) :
+      MRC_ERROR_INVALID_PARAM;
+    if (ret < 0 || state != CIA_STATE_READY_TO_SWITCH_ON) {
+      std::fprintf(stderr,
+        "[miraculous_arm] passive state check failed joint %s node %u: "
+        "ret=%d state=%d expected=%d\n",
+        joint.name.c_str(), joint.node_id, ret, static_cast<int>(state),
+        static_cast<int>(CIA_STATE_READY_TO_SWITCH_ON));
+      ready = false;
+      continue;
+    }
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    cached_states_[joint.joint_index] = state;
+  }
+  return ready;
+}
+
+bool MiraculousArm::disable_voltage()
+{
+  if (!initialized_) {
+    return false;
+  }
+  csp_active_ = false;
+  bool ok = false;
+  {
+    std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
+    ok = disable_voltage_locked(1000);
+  }
+  manual_csp_writer_owns_io_.store(false, std::memory_order_release);
+  return ok;
+}
+
 void MiraculousArm::quick_stop()
 {
   if (!initialized_) {
@@ -329,6 +504,117 @@ bool MiraculousArm::has_fault() const
 {
   std::lock_guard<std::mutex> lock(state_mutex_);
   return fault_detected_;
+}
+
+bool MiraculousArm::is_passive_ready()
+{
+  if (!initialized_ || !passive_) {
+    return false;
+  }
+  std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
+  return verify_passive_ready_locked();
+}
+
+bool MiraculousArm::read_passive_feedback(FeedbackSample & sample, int timeout_ms)
+{
+  if (!initialized_ || !passive_ || timeout_ms <= 0) {
+    return false;
+  }
+
+  std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
+
+  MiraMotor * sync_motor = nullptr;
+  for (auto * motor : motors_) {
+    if (motor) {
+      sync_motor = motor;
+      break;
+    }
+  }
+  if (!sync_motor) {
+    return false;
+  }
+
+  // Drain frames queued before this acquisition, then take the generation
+  // baseline. A successful result therefore requires a TPDO2 received after
+  // the SYNC below for every configured joint.
+  const int drain_ret = miraculous_motor_poll(sync_motor, 0);
+  if (drain_ret < 0) {
+    return false;
+  }
+  std::array<uint64_t, kArmJoints> baseline{};
+  for (const auto & joint : config_.joints) {
+    baseline[joint.joint_index] =
+      tpdo2_generation_[joint.joint_index].load(std::memory_order_acquire);
+  }
+
+  FeedbackSample fresh;
+  fresh.sync_time = std::chrono::steady_clock::now();
+  if (miraculous_motor_sync_send(sync_motor) < 0) {
+    std::fprintf(stderr, "[miraculous_arm] passive feedback: manual SYNC failed\n");
+    return false;
+  }
+  const auto deadline = fresh.sync_time + std::chrono::milliseconds(timeout_ms);
+
+  const auto all_fresh = [&]() {
+      for (const auto & joint : config_.joints) {
+        if (tpdo2_generation_[joint.joint_index].load(std::memory_order_acquire) <=
+          baseline[joint.joint_index])
+        {
+          return false;
+        }
+      }
+      return true;
+    };
+
+  while (!all_fresh()) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      return false;
+    }
+    const auto remaining_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
+    const int remaining_ms =
+      std::max(1, static_cast<int>((remaining_us + 999) / 1000));
+    const int poll_ret = miraculous_motor_poll(sync_motor, remaining_ms);
+    if (poll_ret < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] passive feedback: poll failed: %s (%d)\n",
+        mrc_strerror(poll_ret), poll_ret);
+      return false;
+    }
+  }
+
+  for (const auto & joint : config_.joints) {
+    const size_t i = joint.joint_index;
+    float position = 0.0f;
+    float velocity = 0.0f;
+    const int position_ret =
+      miraculous_motor_get_position_ex(motors_[i], &position, POS_UNIT_RADIAN);
+    const int velocity_ret = miraculous_motor_get_velocity_ex(
+      motors_[i], &velocity, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
+    if (position_ret < 0 || velocity_ret < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] passive feedback: cache read failed joint %s node %u "
+        "(position=%d velocity=%d)\n",
+        joint.name.c_str(), joint.node_id, position_ret, velocity_ret);
+      return false;
+    }
+    fresh.positions_rad[i] = static_cast<double>(position);
+    fresh.velocities_rad_s[i] = static_cast<double>(velocity);
+  }
+
+  fresh.sequence = ++passive_sample_sequence_;
+  {
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    for (const auto & joint : config_.joints) {
+      const size_t i = joint.joint_index;
+      cached_pos_rad_[i] = fresh.positions_rad[i];
+      cached_vel_rad_[i] = fresh.velocities_rad_s[i];
+    }
+    cache_valid_ = true;
+  }
+  sample = fresh;
+  return true;
 }
 
 // ============================ CSP writing ==================================
@@ -621,6 +907,23 @@ void MiraculousArm::read_loop()
     }
 
     std::this_thread::sleep_until(next_wake);
+  }
+}
+
+void MiraculousArm::tpdo_trampoline(
+  uint8_t node_id, uint8_t pdo_num, const uint8_t * data,
+  uint8_t len, void * user_data)
+{
+  auto * self = static_cast<MiraculousArm *>(user_data);
+  if (!self || !data || pdo_num != 2 || len < 8) {
+    return;
+  }
+  for (const auto & joint : self->config_.joints) {
+    if (joint.node_id == node_id) {
+      self->tpdo2_generation_[joint.joint_index].fetch_add(
+        1, std::memory_order_release);
+      return;
+    }
   }
 }
 

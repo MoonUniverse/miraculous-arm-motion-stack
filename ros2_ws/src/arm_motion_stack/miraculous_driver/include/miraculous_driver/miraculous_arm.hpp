@@ -3,6 +3,8 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -54,6 +56,15 @@ struct ArmConfig
 using EmcyCallback =
   std::function<void(uint8_t node_id, uint16_t error_code, uint8_t error_reg)>;
 
+/// One complete feedback set triggered by a single manual SYNC edge.
+struct FeedbackSample
+{
+  uint64_t sequence = 0;
+  std::chrono::steady_clock::time_point sync_time;
+  std::array<double, kArmJoints> positions_rad{};
+  std::array<double, kArmJoints> velocities_rad_s{};
+};
+
 /**
  * @brief C++ wrapper around miraculous_sdk managing the 6 MiraMotor handles of
  *        the ARM manipulator.
@@ -65,8 +76,9 @@ using EmcyCallback =
  *  - CSP write of configured target positions with a unified SYNC broadcast
  *  - joint limit clamping and EMCY detection
  *
- * Threading: read() callers (ros2_control or teach/playback nodes) only copy the
- * cached values and never block on CAN/SDO traffic.
+ * Threading: active-control readers copy the mutex-protected cache. Passive
+ * teach acquisition explicitly owns the SDK mutex for one SYNC/poll cycle and
+ * does not run the background reader.
  */
 class MiraculousArm
 {
@@ -84,8 +96,9 @@ public:
   /// Returns false on any open or CSP configuration failure.
   bool init(const ArmConfig & config);
 
-  /// Passive (teach) mode: initialize the bus/CSP configuration and keep the
-  /// motors NOT enabled so encoder values are readable while free to drag.
+  /// Passive (teach) mode: open/bootstrap the bus, send Shutdown (controlword
+  /// 0x0006), verify Ready to Switch On, and register feedback callbacks.
+  /// CSP is not configured and the background read thread is not started.
   bool init_passive(const ArmConfig & config);
 
   /// Stop the read thread, disable and close all motors. Safe to call once.
@@ -108,6 +121,10 @@ public:
   /// Disable all motors (Operation Enabled -> Switched On).
   void disable();
 
+  /// Cut drive voltage (controlword 0x0000) and verify Switch On Disabled.
+  /// Primarily used by passive teach mode and its fault handling.
+  bool disable_voltage();
+
   /// Quick-stop all motors (emergency deceleration).
   void quick_stop();
 
@@ -121,6 +138,14 @@ public:
   bool get_velocities_rad(std::array<double, kArmJoints> & velocities) const;
   bool get_states(std::array<Cia402State_t, kArmJoints> & states) const;
   bool has_fault() const;
+
+  /// Verify every configured passive drive is still Ready to Switch On.
+  bool is_passive_ready();
+
+  /// In passive mode, send one manual SYNC and wait until every configured
+  /// motor has delivered a new TPDO2 generated after that SYNC. Stale cached
+  /// values are never returned as a successful sample.
+  bool read_passive_feedback(FeedbackSample & sample, int timeout_ms);
 
   // ---- CSP writing ---------------------------------------------------------
 
@@ -144,11 +169,19 @@ public:
 
 private:
   // internal helpers
+  bool validate_config(const ArmConfig & config, const char * caller) const;
   bool open_motors();
+  void close_motors(bool force_disable_voltage);
+  bool enter_passive_ready_locked(int timeout_ms);
+  bool verify_passive_ready_locked();
+  bool disable_voltage_locked(int timeout_ms);
   bool refresh_feedback_locked(bool send_sync, int poll_timeout_ms);
   void start_read_thread();
   void stop_read_thread();
   void read_loop();
+  static void tpdo_trampoline(
+    uint8_t node_id, uint8_t pdo_num, const uint8_t * data,
+    uint8_t len, void * user_data);
   static void emcy_trampoline(
     uint8_t node_id, uint16_t error_code, uint8_t error_reg,
     const uint8_t * mfg_data, uint8_t mfg_len, void * user_data);
@@ -175,6 +208,10 @@ private:
   std::array<Cia402State_t, kArmJoints> cached_states_{};
   bool cache_valid_{false};
   bool fault_detected_{false};
+
+  // TPDO freshness tracking for passive, single-SYNC feedback acquisition.
+  std::array<std::atomic<uint64_t>, kArmJoints> tpdo2_generation_{};
+  uint64_t passive_sample_sequence_{0};
 
   // background thread
   std::thread read_thread_;

@@ -15,7 +15,11 @@ def generate_launch_description():
     node_ids = LaunchConfiguration("node_ids")
     joint_indices = LaunchConfiguration("joint_indices")
     record_rate = LaunchConfiguration("record_rate")
+    output_file = LaunchConfiguration("output_file")
     auto_record = LaunchConfiguration("auto_record")
+    feedback_timeout_ms = LaunchConfiguration("feedback_timeout_ms")
+    max_consecutive_misses = LaunchConfiguration("max_consecutive_misses")
+    overwrite_existing = LaunchConfiguration("overwrite_existing")
 
     arm_description_share = get_package_share_directory("arm_description")
     robot_xacro = os.path.join(arm_description_share, "urdf", "arm.urdf.xacro")
@@ -39,7 +43,11 @@ def generate_launch_description():
             "joint_indices": ParameterValue(joint_indices, value_type=str),
             "joint_states_topic": joint_states_topic,
             "record_rate": record_rate,
+            "output_file": ParameterValue(output_file, value_type=str),
             "auto_record": auto_record,
+            "feedback_timeout_ms": feedback_timeout_ms,
+            "max_consecutive_misses": max_consecutive_misses,
+            "overwrite_existing": overwrite_existing,
         }],
     )
 
@@ -51,7 +59,11 @@ def generate_launch_description():
         DeclareLaunchArgument("joint_indices", default_value="0,1,2,3,4,5",
                               description="ROS joint indices for node_ids: 0=J1..5=J6"),
         DeclareLaunchArgument("record_rate", default_value="50.0"),
+        DeclareLaunchArgument("output_file", default_value=""),
         DeclareLaunchArgument("auto_record", default_value="false"),
+        DeclareLaunchArgument("feedback_timeout_ms", default_value="2"),
+        DeclareLaunchArgument("max_consecutive_misses", default_value="10"),
+        DeclareLaunchArgument("overwrite_existing", default_value="false"),
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",

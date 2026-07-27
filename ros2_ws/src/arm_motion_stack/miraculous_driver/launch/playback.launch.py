@@ -19,6 +19,10 @@ def generate_launch_description():
     input_file = LaunchConfiguration("input_file")
     speed_scale = LaunchConfiguration("speed_scale")
     loop = LaunchConfiguration("loop")
+    approach_velocity_rad_s = LaunchConfiguration("approach_velocity_rad_s")
+    approach_rate_hz = LaunchConfiguration("approach_rate_hz")
+    approach_min_duration_s = LaunchConfiguration("approach_min_duration_s")
+    start_tolerance_rad = LaunchConfiguration("start_tolerance_rad")
 
     arm_description_share = get_package_share_directory("arm_description")
     robot_xacro = os.path.join(arm_description_share, "urdf", "arm.urdf.xacro")
@@ -43,9 +47,13 @@ def generate_launch_description():
             "position_min": ParameterValue(position_min, value_type=str),
             "position_max": ParameterValue(position_max, value_type=str),
             "joint_states_topic": joint_states_topic,
-            "input_file": input_file,
+            "input_file": ParameterValue(input_file, value_type=str),
             "speed_scale": speed_scale,
             "loop": loop,
+            "approach_velocity_rad_s": approach_velocity_rad_s,
+            "approach_rate_hz": approach_rate_hz,
+            "approach_min_duration_s": approach_min_duration_s,
+            "start_tolerance_rad": start_tolerance_rad,
         }],
     )
 
@@ -61,6 +69,10 @@ def generate_launch_description():
         DeclareLaunchArgument("input_file", default_value=""),
         DeclareLaunchArgument("speed_scale", default_value="1.0"),
         DeclareLaunchArgument("loop", default_value="false"),
+        DeclareLaunchArgument("approach_velocity_rad_s", default_value="0.1"),
+        DeclareLaunchArgument("approach_rate_hz", default_value="50.0"),
+        DeclareLaunchArgument("approach_min_duration_s", default_value="0.5"),
+        DeclareLaunchArgument("start_tolerance_rad", default_value="0.005"),
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
