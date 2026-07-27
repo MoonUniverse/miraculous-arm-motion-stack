@@ -93,6 +93,46 @@ target_link_libraries(trajectory_tracking_test_node ${PROJECT_NAME})
 ament_target_dependencies(trajectory_tracking_test_node rclcpp sensor_msgs std_srvs)
 set_target_properties(trajectory_tracking_test_node PROPERTIES INSTALL_RPATH "$ORIGIN")
 
+# ---- tests -----------------------------------------------------------------
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_enable_csp
+    test/test_enable_csp.cpp
+    src/miraculous_arm.cpp
+  )
+  target_include_directories(test_enable_csp
+    PRIVATE
+      include
+      ${MIRACULOUS_SDK_DIR}/include
+  )
+  target_link_libraries(test_enable_csp
+    ${MIRACULOUS_SDK_LIB}
+    pthread
+    rt
+  )
+  set_target_properties(test_enable_csp PROPERTIES
+    BUILD_RPATH "${MIRACULOUS_SDK_LIBDIR}"
+    LINK_FLAGS
+      "-Wl,--wrap=miraculous_motor_sync_stop \
+       -Wl,--wrap=miraculous_motor_sync_start \
+       -Wl,--wrap=miraculous_motor_sync_send \
+       -Wl,--wrap=miraculous_motor_poll \
+       -Wl,--wrap=miraculous_motor_get_state \
+       -Wl,--wrap=miraculous_motor_shutdown \
+       -Wl,--wrap=miraculous_motor_wait_state \
+       -Wl,--wrap=miraculous_motor_get_mode \
+       -Wl,--wrap=miraculous_motor_set_mode \
+       -Wl,--wrap=miraculous_motor_switch_on \
+       -Wl,--wrap=miraculous_motor_get_position_ex \
+       -Wl,--wrap=miraculous_motor_csp_set_target_ex \
+       -Wl,--wrap=miraculous_motor_enable \
+       -Wl,--wrap=miraculous_motor_quick_stop \
+       -Wl,--wrap=miraculous_motor_disable_voltage \
+       -Wl,--wrap=miraculous_motor_fault_reset"
+  )
+endif()
+
 # ---- pluginlib export ----
 pluginlib_export_plugin_description_file(hardware_interface miraculous_driver_plugins.xml)
 

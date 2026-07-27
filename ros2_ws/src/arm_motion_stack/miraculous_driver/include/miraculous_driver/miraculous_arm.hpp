@@ -37,7 +37,7 @@ struct ArmConfig
   std::vector<JointConfig> joints;            ///< configured real joints, 1..kArmJoints entries
   /// CSP SYNC period [us]. 0 = manual SYNC (wrapper sends one unified SYNC frame
   /// per write cycle after setting all targets). Non-zero = one shared SDK SYNC
-  /// timer started on the first motor handle (never one timer per motor).
+  /// timer configured during init() and started only after safe CSP enable.
   uint32_t sync_period_us = 0;
   /// Encoder bits for the SDK radian conversion (2^bw counts/rev). SDK default 19.
   uint8_t encoder_bw = 19;
@@ -106,6 +106,7 @@ public:
 
   bool is_initialized() const { return initialized_; }
   bool is_passive() const { return passive_; }
+  bool is_csp_enabled() const { return csp_active_.load(std::memory_order_acquire); }
 
   // ---- PDS state machine ---------------------------------------------------
 
@@ -168,10 +169,27 @@ public:
   void set_emcy_callback(EmcyCallback callback);
 
 private:
+  enum class CspEnableStage : uint8_t
+  {
+    kUntouched = 0,
+    kStateChangeAttempted,
+    kReadyToSwitchOn,
+    kModeConfirmed,
+    kSwitchedOn,
+    kSeedWritten,
+    kEnableAttempted,
+    kOperationEnabled,
+  };
+
   // internal helpers
   bool validate_config(const ArmConfig & config, const char * caller) const;
   bool open_motors();
   void close_motors(bool force_disable_voltage);
+  MiraMotor * first_motor_locked() const;
+  bool acquire_fresh_seed_positions_locked(
+    std::array<double, kArmJoints> & positions, int timeout_ms);
+  bool rollback_csp_enable_locked(
+    const std::array<CspEnableStage, kArmJoints> & stages);
   bool enter_passive_ready_locked(int timeout_ms);
   bool verify_passive_ready_locked();
   bool disable_voltage_locked(int timeout_ms);
@@ -191,14 +209,16 @@ private:
 
   bool initialized_{false};
   bool passive_{false};
-  /// True while CSP is enabled. Manual mode gets SYNC from the write cycle and
-  /// inactive manual mode from the read thread. Timer mode is configured once
-  /// in init() and remains running until shutdown(), including while disabled.
+  /// Published only after every configured drive has passed the complete CSP
+  /// seed/enable/state-verification transaction.
   std::atomic<bool> csp_active_{false};
-  /// Manual CSP writer ownership. While true, set_targets_rad() owns all SDK
-  /// I/O (RPDO, SYNC, poll, feedback cache update) and the read thread sleeps.
-  /// Timer CSP leaves this false because its timerfd is serviced by read_loop().
-  std::atomic<bool> manual_csp_writer_owns_io_{false};
+  /// Exclusive SDK I/O ownership. This is true throughout enable_csp() for both
+  /// SYNC modes, remains true during active manual CSP, and is also retained
+  /// after an incomplete rollback so read_loop() cannot emit a dangerous SYNC.
+  std::atomic<bool> exclusive_sdk_io_{false};
+  /// Guarded by sdk_mutex_. csp_init() configures timer mode once, while the
+  /// timer itself is stopped until a complete enable_csp() succeeds.
+  bool sync_timer_running_{false};
 
   // cached state (mutex protected)
   mutable std::mutex state_mutex_;
@@ -220,6 +240,8 @@ private:
   // EMCY
   EmcyCallback emcy_callback_;
   mutable std::mutex emcy_mutex_;
+
+  friend class MiraculousArmTestPeer;
 };
 
 }  // namespace miraculous_driver
