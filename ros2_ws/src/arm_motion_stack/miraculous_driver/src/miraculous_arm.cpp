@@ -87,28 +87,36 @@ bool MiraculousArm::init(const ArmConfig & config)
     }
   }
 
-  // CSP PDO/SYNC setup is process-lifetime configuration. Some drives do not
-  // tolerate running csp_init again after a disable/enable cycle. Timer mode is
-  // configured here but stopped before the read thread starts; enable_csp()
-  // starts it only after every axis is safely seeded and Operation Enabled.
+  // CSP PDO setup is process-lifetime configuration. Some drives do not
+  // tolerate running csp_init again after a disable/enable cycle. Always use
+  // manual initialization here: the latest SDK reference-counts every
+  // non-manual csp_init() against one shared timer, which would let a multi-axis
+  // timer remain active during safe seeding. Timer mode writes 0x1006 per drive
+  // and starts the one shared timer only after enable_csp() succeeds.
   const bool timer_sync = (config_.sync_period_us != 0);
+  constexpr uint16_t kCommunicationCyclePeriodIndex = 0x1006;
   for (const auto & joint : config_.joints) {
     auto * motor = motors_[joint.joint_index];
-    if (miraculous_motor_csp_init(motor, config_.sync_period_us, !timer_sync) < 0) {
+    int ret = miraculous_motor_csp_init(motor, config_.sync_period_us, true);
+    if (ret < 0) {
       std::fprintf(stderr,
-        "[miraculous_arm] init: csp_init failed joint %s\n",
-        joint.name.c_str());
+        "[miraculous_arm] init: csp_init failed joint %s node %u: %s (%d)\n",
+        joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
       close_motors(false);
       return false;
     }
-  }
-  if (timer_sync) {
-    auto * sync_motor = first_motor_locked();
-    if (!sync_motor || miraculous_motor_sync_stop(sync_motor) < 0) {
-      std::fprintf(stderr,
-        "[miraculous_arm] init: failed to stop timer SYNC before CSP enable\n");
-      close_motors(false);
-      return false;
+    if (timer_sync) {
+      const uint32_t period_us = config_.sync_period_us;
+      ret = miraculous_motor_sdo_write(
+        motor, kCommunicationCyclePeriodIndex, 0,
+        &period_us, static_cast<uint8_t>(sizeof(period_us)));
+      if (ret < 0) {
+        std::fprintf(stderr,
+          "[miraculous_arm] init: write 0x1006 failed joint %s node %u: %s (%d)\n",
+          joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
+        close_motors(false);
+        return false;
+      }
     }
   }
   sync_timer_running_ = false;
@@ -266,22 +274,16 @@ MiraMotor * MiraculousArm::first_motor_locked() const
   return nullptr;
 }
 
-bool MiraculousArm::acquire_fresh_seed_positions_locked(
-  std::array<double, kArmJoints> & positions, int timeout_ms)
+int MiraculousArm::sync_and_wait_for_fresh_feedback_locked(
+  int timeout_ms, const char * context,
+  std::chrono::steady_clock::time_point * sync_time)
 {
   auto * sync_motor = first_motor_locked();
-  if (!sync_motor || timeout_ms <= 0) {
-    return false;
+  if (!sync_motor) {
+    return MRC_ERROR_NOT_INIT;
   }
-
-  // Drain TPDOs queued before this transaction, then require every configured
-  // joint's generation to advance after the controlled SYNC below.
-  const int drain_ret = miraculous_motor_poll(sync_motor, 0);
-  if (drain_ret < 0) {
-    std::fprintf(stderr,
-      "[miraculous_arm] enable_csp: seed feedback drain failed: %s (%d)\n",
-      mrc_strerror(drain_ret), drain_ret);
-    return false;
+  if (timeout_ms <= 0) {
+    return MRC_ERROR_INVALID_PARAM;
   }
 
   std::array<uint64_t, kArmJoints> baseline{};
@@ -290,14 +292,20 @@ bool MiraculousArm::acquire_fresh_seed_positions_locked(
       tpdo2_generation_[joint.joint_index].load(std::memory_order_acquire);
   }
 
-  if (miraculous_motor_sync_send(sync_motor) < 0) {
-    std::fprintf(stderr,
-      "[miraculous_arm] enable_csp: seed feedback SYNC failed\n");
-    return false;
+  const auto sent_at = std::chrono::steady_clock::now();
+  const int sync_ret = miraculous_motor_sync_send(sync_motor);
+  if (sync_ret < 0) {
+    if (context) {
+      std::fprintf(stderr,
+        "[miraculous_arm] %s: manual SYNC failed: %s (%d)\n",
+        context, mrc_strerror(sync_ret), sync_ret);
+    }
+    return sync_ret;
+  }
+  if (sync_time) {
+    *sync_time = sent_at;
   }
 
-  const auto deadline =
-    std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   const auto all_fresh = [&]() {
       for (const auto & joint : config_.joints) {
         if (tpdo2_generation_[joint.joint_index].load(std::memory_order_acquire) <=
@@ -309,31 +317,33 @@ bool MiraculousArm::acquire_fresh_seed_positions_locked(
       return true;
     };
 
-  while (!all_fresh()) {
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= deadline) {
-      for (const auto & joint : config_.joints) {
-        if (tpdo2_generation_[joint.joint_index].load(std::memory_order_acquire) <=
-          baseline[joint.joint_index])
-        {
-          std::fprintf(stderr,
-            "[miraculous_arm] enable_csp: fresh seed feedback timed out joint %s "
-            "node %u\n", joint.name.c_str(), joint.node_id);
-        }
+  const auto deadline = sent_at + std::chrono::milliseconds(timeout_ms);
+  std::unique_lock<std::mutex> feedback_lock(feedback_wait_mutex_);
+  if (feedback_cv_.wait_until(feedback_lock, deadline, all_fresh)) {
+    return MRC_SUCCESS;
+  }
+
+  if (context) {
+    for (const auto & joint : config_.joints) {
+      if (tpdo2_generation_[joint.joint_index].load(std::memory_order_acquire) <=
+        baseline[joint.joint_index])
+      {
+        std::fprintf(stderr,
+          "[miraculous_arm] %s: fresh TPDO2 timed out joint %s node %u\n",
+          context, joint.name.c_str(), joint.node_id);
       }
-      return false;
     }
-    const auto remaining_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
-    const int remaining_ms =
-      std::max(1, static_cast<int>((remaining_us + 999) / 1000));
-    const int poll_ret = miraculous_motor_poll(sync_motor, remaining_ms);
-    if (poll_ret < 0) {
-      std::fprintf(stderr,
-        "[miraculous_arm] enable_csp: seed feedback poll failed: %s (%d)\n",
-        mrc_strerror(poll_ret), poll_ret);
-      return false;
-    }
+  }
+  return MRC_ERROR_TIMEOUT;
+}
+
+int MiraculousArm::acquire_fresh_seed_positions_locked(
+  std::array<double, kArmJoints> & positions, int timeout_ms)
+{
+  const int feedback_ret = sync_and_wait_for_fresh_feedback_locked(
+    timeout_ms, "enable_csp seed feedback");
+  if (feedback_ret < 0) {
+    return feedback_ret;
   }
 
   std::array<double, kArmJoints> fresh_positions{};
@@ -345,13 +355,13 @@ bool MiraculousArm::acquire_fresh_seed_positions_locked(
       std::fprintf(stderr,
         "[miraculous_arm] enable_csp: fresh position read failed joint %s node %u: "
         "%s (%d)\n", joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
-      return false;
+      return ret;
     }
     fresh_positions[joint.joint_index] = static_cast<double>(position_rad);
   }
 
   positions = fresh_positions;
-  return true;
+  return MRC_SUCCESS;
 }
 
 bool MiraculousArm::rollback_csp_enable_locked(
@@ -552,8 +562,9 @@ bool MiraculousArm::enable_csp()
   // post-SYNC TPDO generation set and record every position before writing any
   // seed target.
   std::array<double, kArmJoints> seed_positions{};
-  if (!acquire_fresh_seed_positions_locked(seed_positions, 50)) {
-    return fail("acquire fresh seed feedback", nullptr, MRC_ERROR_TIMEOUT);
+  int ret = acquire_fresh_seed_positions_locked(seed_positions, 50);
+  if (ret < 0) {
+    return fail("acquire fresh seed feedback", nullptr, ret);
   }
 
   for (const auto & joint : config_.joints) {
@@ -565,8 +576,11 @@ bool MiraculousArm::enable_csp()
     }
     stages[i] = CspEnableStage::kSeedWritten;
   }
-  int ret = miraculous_motor_sync_send(sync_motor);
-  if (ret < 0) {
+  ret = MRC_SUCCESS;
+  ret = sync_and_wait_for_fresh_feedback_locked(
+    50, "latch pre-enable seed targets");
+  if (ret < 0)
+  {
     return fail("latch pre-enable seed targets", nullptr, ret);
   }
 
@@ -595,8 +609,10 @@ bool MiraculousArm::enable_csp()
       return fail("write post-enable hold target", &joint, ret);
     }
   }
-  ret = miraculous_motor_sync_send(sync_motor);
-  if (ret < 0) {
+  ret = sync_and_wait_for_fresh_feedback_locked(
+    50, "latch post-enable hold targets");
+  if (ret < 0)
+  {
     return fail("latch post-enable hold targets", nullptr, ret);
   }
 
@@ -872,65 +888,11 @@ bool MiraculousArm::read_passive_feedback(FeedbackSample & sample, int timeout_m
 
   std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
 
-  MiraMotor * sync_motor = nullptr;
-  for (auto * motor : motors_) {
-    if (motor) {
-      sync_motor = motor;
-      break;
-    }
-  }
-  if (!sync_motor) {
-    return false;
-  }
-
-  // Drain frames queued before this acquisition, then take the generation
-  // baseline. A successful result therefore requires a TPDO2 received after
-  // the SYNC below for every configured joint.
-  const int drain_ret = miraculous_motor_poll(sync_motor, 0);
-  if (drain_ret < 0) {
-    return false;
-  }
-  std::array<uint64_t, kArmJoints> baseline{};
-  for (const auto & joint : config_.joints) {
-    baseline[joint.joint_index] =
-      tpdo2_generation_[joint.joint_index].load(std::memory_order_acquire);
-  }
-
   FeedbackSample fresh;
-  fresh.sync_time = std::chrono::steady_clock::now();
-  if (miraculous_motor_sync_send(sync_motor) < 0) {
-    std::fprintf(stderr, "[miraculous_arm] passive feedback: manual SYNC failed\n");
+  if (sync_and_wait_for_fresh_feedback_locked(
+      timeout_ms, nullptr, &fresh.sync_time) < 0)
+  {
     return false;
-  }
-  const auto deadline = fresh.sync_time + std::chrono::milliseconds(timeout_ms);
-
-  const auto all_fresh = [&]() {
-      for (const auto & joint : config_.joints) {
-        if (tpdo2_generation_[joint.joint_index].load(std::memory_order_acquire) <=
-          baseline[joint.joint_index])
-        {
-          return false;
-        }
-      }
-      return true;
-    };
-
-  while (!all_fresh()) {
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= deadline) {
-      return false;
-    }
-    const auto remaining_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
-    const int remaining_ms =
-      std::max(1, static_cast<int>((remaining_us + 999) / 1000));
-    const int poll_ret = miraculous_motor_poll(sync_motor, remaining_ms);
-    if (poll_ret < 0) {
-      std::fprintf(stderr,
-        "[miraculous_arm] passive feedback: poll failed: %s (%d)\n",
-        mrc_strerror(poll_ret), poll_ret);
-      return false;
-    }
   }
 
   for (const auto & joint : config_.joints) {
@@ -991,7 +953,10 @@ bool MiraculousArm::set_targets_rad(const std::array<double, kArmJoints> & targe
     }
     // Unified manual SYNC so all axes apply targets on the same edge.
     if (config_.sync_period_us == 0) {
-      if (!refresh_feedback_locked(true, 2)) {
+      // The latest SDK dispatches TPDOs from its receive thread. Allow enough
+      // scheduling margin for the callback without adding fixed latency:
+      // condition_variable wakes as soon as every joint has responded.
+      if (!refresh_feedback_locked(true, 5)) {
         ok = false;
       }
     }
@@ -1015,24 +980,14 @@ void MiraculousArm::send_sync()
   }
 }
 
-bool MiraculousArm::refresh_feedback_locked(bool send_sync, int poll_timeout_ms)
+bool MiraculousArm::refresh_feedback_locked(bool send_sync, int feedback_timeout_ms)
 {
-  MiraMotor * sync_motor = nullptr;
-  for (auto * motor : motors_) {
-    if (motor) {
-      sync_motor = motor;
-      break;
-    }
-  }
-  if (!sync_motor) {
+  if (send_sync &&
+    sync_and_wait_for_fresh_feedback_locked(
+      feedback_timeout_ms, "refresh_feedback") < 0)
+  {
     return false;
   }
-  if (send_sync && miraculous_motor_sync_send(sync_motor) < 0) {
-    std::fprintf(stderr, "[miraculous_arm] refresh_feedback: manual SYNC failed\n");
-    return false;
-  }
-
-  // miraculous_motor_poll(sync_motor, poll_timeout_ms);
 
   std::array<double, kArmJoints> refreshed_pos{};
   std::array<double, kArmJoints> refreshed_vel{};
@@ -1137,8 +1092,8 @@ void MiraculousArm::read_loop()
     next_wake += period;
 
     // In active manual CSP, set_targets_rad() performs the complete bus cycle:
-    // RPDO writes, one SYNC, poll, and feedback cache update. Avoid both SDK
-    // contention and an asynchronous overwrite of that cycle's feedback.
+    // RPDO writes, one SYNC, a fresh-feedback wait, and cache update. Avoid both
+    // SDK contention and an asynchronous overwrite of that cycle's feedback.
     if (exclusive_sdk_io_.load(std::memory_order_acquire)) {
       std::this_thread::sleep_until(next_wake);
       continue;
@@ -1161,63 +1116,46 @@ void MiraculousArm::read_loop()
         // enable, and after a complete rollback, use an explicit feedback SYNC
         // while the drives are non-enabled. enable_csp() holds exclusive SDK I/O
         // across preparation and seeding, so this path cannot interleave there.
-        // Then get_position_ex/get_velocity_ex poll and read the latest cache.
-        for (auto * motor : motors_) {
-          if (motor) {
-            if (!csp_active_ &&
-              (config_.sync_period_us == 0 || !sync_timer_running_))
-            {
-              miraculous_motor_sync_send(motor);
-              // const double timestamp_s = std::chrono::duration<double>(
-              //   std::chrono::system_clock::now().time_since_epoch()).count();
-              // std::fprintf(stderr,
-              //   "[%.6f] !csp_active_ && config_.sync_period_us == 0:"
-              //   "miraculous_motor_sync_send\n",
-              //   timestamp_s);
-              //miraculous_motor_poll(motor, 1);  // allow SYNC-triggered TPDOs to arrive
-            } else {
-              //miraculous_motor_poll(motor, 0);
-            }
-            break;
-          }
+        // In the inactive paths, wait for the SDK receive thread to dispatch
+        // one complete TPDO2 generation before reading its caches.
+        bool feedback_ready = true;
+        if (!csp_active_ &&
+          (config_.sync_period_us == 0 || !sync_timer_running_))
+        {
+          feedback_ready =
+            sync_and_wait_for_fresh_feedback_locked(
+              std::max(
+                1, std::min(10, static_cast<int>((period_us + 999) / 1000))),
+              nullptr) >= 0;
         }
-        for (const auto & joint : config_.joints) {
-          const size_t i = joint.joint_index;
-          auto * motor = motors_[i];
-          if (!motor) {
-            continue;
-          }
-          float p_rad = 0.0f;
-          float v_rad_s = 0.0f;
-          const int pret = miraculous_motor_get_position_ex(motor, &p_rad, POS_UNIT_RADIAN);
-          std::fprintf(stderr,
-            "[miraculous_arm] read_loop: get_position_ex joint %s node %u: %s (%d)\n",
-            joint.name.c_str(), joint.node_id, mrc_strerror(pret), pret);
-          if (pret < 0) {
-            // Rate-limited, with a startup grace: the first SYNC-triggered TPDO
-            // can miss the 1 ms poll window right after bootstrap, so stay quiet
-            // for the first ~0.5 s and only warn on a persistent failure.
-            if (read_fail_streak >= kReadFailWarnStreak &&
-              ((read_fail_streak - kReadFailWarnStreak) % 500) == 0)  // ~every 5 s at 100 Hz
-            {
-              std::fprintf(stderr,
-                "[miraculous_arm] read_loop: get_position_ex failing joint %s node %u: %s (%d) "
-                "(%zu consecutive cycles)\n",
-                joint.name.c_str(), joint.node_id, mrc_strerror(pret), pret, read_fail_streak);
-            }
-            continue;
-          }
-          miraculous_motor_get_velocity_ex(motor, &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
-          if (poll_state) {
-            Cia402State_t s = CIA_STATE_NOT_READY_TO_SWITCH_ON;
-            if (miraculous_motor_get_state(motor, &s) >= 0) {
-              states[i] = s;
-            }
-          }
 
-          joint_pos_rad[i] = p_rad;
-          joint_vel_rad_s[i] = v_rad_s;
-          position_ok[i] = true;
+        if (feedback_ready) {
+          for (const auto & joint : config_.joints) {
+            const size_t i = joint.joint_index;
+            auto * motor = motors_[i];
+            if (!motor) {
+              continue;
+            }
+            float p_rad = 0.0f;
+            float v_rad_s = 0.0f;
+            const int pret =
+              miraculous_motor_get_position_ex(motor, &p_rad, POS_UNIT_RADIAN);
+            if (pret < 0) {
+              continue;
+            }
+            miraculous_motor_get_velocity_ex(
+              motor, &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
+            if (poll_state) {
+              Cia402State_t s = CIA_STATE_NOT_READY_TO_SWITCH_ON;
+              if (miraculous_motor_get_state(motor, &s) >= 0) {
+                states[i] = s;
+              }
+            }
+
+            joint_pos_rad[i] = p_rad;
+            joint_vel_rad_s[i] = v_rad_s;
+            position_ok[i] = true;
+          }
         }
         sdk_cycle_completed = true;
       }
@@ -1250,6 +1188,13 @@ void MiraculousArm::read_loop()
         }
         cache_valid_ = true;
       } else {
+        if (read_fail_streak >= kReadFailWarnStreak &&
+          ((read_fail_streak - kReadFailWarnStreak) % 500) == 0)
+        {
+          std::fprintf(stderr,
+            "[miraculous_arm] read_loop: fresh position feedback unavailable "
+            "(%zu consecutive cycles)\n", read_fail_streak);
+        }
         ++read_fail_streak;
       }
       if (poll_state) {
@@ -1281,6 +1226,7 @@ void MiraculousArm::tpdo_trampoline(
     if (joint.node_id == node_id) {
       self->tpdo2_generation_[joint.joint_index].fetch_add(
         1, std::memory_order_release);
+      self->feedback_cv_.notify_all();
       return;
     }
   }

@@ -79,7 +79,7 @@ int main(int argc, char **argv)
         miraculous_motor_set_heartbeat_scan(base, hb_callback, NULL);
         time_t start = time(NULL);
         while (!g_quit && (time(NULL) - start) < 10) {
-            miraculous_motor_poll(base, 200);
+            usleep(200000);
         }
     } else {
         printf("  No motors found.\n");

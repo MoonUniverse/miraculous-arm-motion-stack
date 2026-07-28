@@ -13,15 +13,9 @@ int miraculous_motor_mit_init(MiraMotor *motor, uint32_t sync_period_us)
 {
     if (!motor) return MRC_ERROR_INVALID_PARAM;
 
-    /* 切换到 MIT 模式 */
-    int ret = miraculous_motor_set_mode(motor, CIA_MODE_MIT);
-    if (ret < 0) {
-        fprintf(stderr, "[mit] set mode failed\n");
-        return ret;
-    }
-
     /* SYNC 策略 */
     motor->sync_active = false;
+    int ret;
 
     if (sync_period_us > 0) {
         ret = miraculous_co_sync_start(motor->co, sync_period_us);

@@ -107,7 +107,7 @@ public:
     record_rate_ = declare_parameter<double>("record_rate", 50.0);
     output_file_ = declare_parameter<std::string>("output_file", "");
     auto_record_ = declare_parameter<bool>("auto_record", false);
-    feedback_timeout_ms_ = declare_parameter<int>("feedback_timeout_ms", 2);
+    feedback_timeout_ms_ = declare_parameter<int>("feedback_timeout_ms", 5);
     max_consecutive_misses_ = declare_parameter<int>("max_consecutive_misses", 10);
     overwrite_existing_ = declare_parameter<bool>("overwrite_existing", false);
 
@@ -506,7 +506,7 @@ private:
   double record_rate_{50.0};
   std::string output_file_;
   bool auto_record_{false};
-  int feedback_timeout_ms_{2};
+  int feedback_timeout_ms_{5};
   int max_consecutive_misses_{10};
   bool overwrite_existing_{false};
   std::vector<JointConfig> joints_;

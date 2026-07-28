@@ -11,22 +11,22 @@
 #include <stdio.h>
 #include "miraculous_internal.h"
 
+#define PT_CTRL_SDO_TIMEOUT_MS 2000
+
 int miraculous_motor_pt_move(MiraMotor *motor,
                               int16_t target_torque,
                               uint16_t slope)
 {
     if (!motor) return MRC_ERROR_INVALID_PARAM;
 
-    /* Step 1: 模式 */
-    int ret = miraculous_motor_set_mode(motor, CIA_MODE_PT);
-    if (ret < 0) return ret;
+    int ret;
 
-    /* Step 2: 转矩斜率 (0x6087) — 仅首次尝试 */
+    /* Step 1: 转矩斜率 (0x6087) — 仅首次尝试 */
     static bool slope_unsupported = false;
     if (slope > 0 && !slope_unsupported) {
-        uint32_t slope_val = slope; /* CiA402: UINT32, 单位 1A/s */
+        uint32_t slope_val = slope;
         ret = CO_SDO_WRITE(motor->co, motor->node_id,
-                           CIA402_OD_TORQUE_SLOPE, 0, &slope_val, 100);
+                           CIA402_OD_TORQUE_SLOPE, 0, &slope_val, PT_CTRL_SDO_TIMEOUT_MS);
         if (ret < 0) {
             slope_unsupported = true;
             /* 非致命, 记录一次即可 */
@@ -36,11 +36,9 @@ int miraculous_motor_pt_move(MiraMotor *motor,
 
     /* Step 3: 目标转矩 0x6071 */
     ret = CO_SDO_WRITE(motor->co, motor->node_id,
-                       CIA402_OD_TARGET_TORQUE, 0, &target_torque, 100);
+                       CIA402_OD_TARGET_TORQUE, 0, &target_torque, PT_CTRL_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
-    /* 触发: Enable Op */
-    uint16_t cw = CIA402_CW_ENABLE_OPERATION;
-    return CO_SDO_WRITE(motor->co, motor->node_id,
-                        CIA402_OD_CONTROLWORD, 0, &cw, 100);
+    /* 目标转矩写入后立即生效, 无需额外触发 */
+    return MRC_SUCCESS;
 }

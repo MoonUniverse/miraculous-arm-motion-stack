@@ -35,20 +35,35 @@ int main(int argc, char **argv)
     if (!motor) { fprintf(stderr, "Failed to open motor\n"); return -1; }
 
     if (miraculous_motor_bootstrap(motor, 3000) < 0) goto cleanup;
-    if (miraculous_motor_full_enable(motor) < 0) goto cleanup;
-
-    printf("PT mode — toggling torque direction every 5s...\n");
-
-    /* --- 设置操作模式为 PT --- */
+      /* --- 设置操作模式为 PT --- */
     if (miraculous_motor_set_mode(motor, CIA_MODE_PT) < 0) {
         fprintf(stderr, "Set PT mode failed\n");
         goto cleanup;
     }
+    
+    if (miraculous_motor_full_enable(motor) < 0) {
+        uint16_t sw = 0;
+        uint16_t err = 0;
+        uint8_t len = 2;
+        miraculous_motor_get_statusword(motor, &sw);
+        fprintf(stderr, "full_enable failed, statusword=0x%04X", sw);
+        if (miraculous_motor_sdo_read(motor, CIA402_OD_ERROR_CODE, 0, &err, &len) == 0)
+            fprintf(stderr, " error_code=0x%04X", err);
+        fprintf(stderr, "\n");
+        goto cleanup;
+    }
 
-    int16_t target_torque = 100;  /* 0.01A 单位，1A*/
-    uint16_t slope = 3;         /* 3A/s */
+    printf("PT mode — toggling torque direction every 5s...\n");
+
+    int16_t torque_values[] = {100, 0, -100, 0};
+    int torque_idx = 0;
+    uint16_t slope = 2;         /* 2A/s */
+    printf(" slope = %d A/s\n",slope);
 
     while (!g_quit) {
+        int16_t target_torque = torque_values[torque_idx % 4];
+        torque_idx++;
+
         int ret = miraculous_motor_pt_move(motor, target_torque, slope);
         if (ret < 0) {
             fprintf(stderr, "PT move failed: %s\n", mrc_strerror(ret));
@@ -57,14 +72,18 @@ int main(int argc, char **argv)
 
         printf("Running torque = %d (0.01A)\n", target_torque);
 
-        /* 运行 5 秒 */
-        for (int i = 0; i < 5 && !g_quit; i++) {
-            sleep(1);
+        /* 运行 3 秒, 每 3ms 通过 TPDO 读取实际转矩 */
+        for (int i = 0; i < 600 && !g_quit; i++) {
+            miraculous_motor_sync_send(motor);
+            usleep(5000);
+            int16_t torque;
+            if (miraculous_motor_get_torque(motor, &torque) == 0)
+                printf(" t=%dms  Actual torque = %d (0.01A) \r\n ",
+                       (i + 1) * 5, torque);
         }
-
-        target_torque = -target_torque; /* 反转转矩方向 */
     }
 
+shutdown:
     miraculous_motor_shutdown(motor);
 
 cleanup:

@@ -27,7 +27,6 @@
 #include <net/if.h>
 #include "miraculous_internal.h"
 
-#define MOTION_SDO_TIMEOUT_MS  5
 
 /*----------------------------------------------------------------------------
  * 全局 CAN 总线注册表: 同一 ifname 复用同一个 master
@@ -37,8 +36,37 @@ static struct {
     char          ifname[IFNAMSIZ];
     MiraCoMaster *master;
 } g_bus_reg[MAX_BUS_REGISTRY];
+static pthread_mutex_t g_bus_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static MiraCoMaster* find_master(const char *ifname)
+{
+    pthread_mutex_lock(&g_bus_lock);
+    for (int i = 0; i < MAX_BUS_REGISTRY; i++) {
+        if (g_bus_reg[i].master &&
+            strcmp(g_bus_reg[i].ifname, ifname) == 0) {
+            pthread_mutex_unlock(&g_bus_lock);
+            return g_bus_reg[i].master;
+        }
+    }
+    pthread_mutex_unlock(&g_bus_lock);
+    return NULL;
+}
+
+static void unreg_master(MiraCoMaster *co)
+{
+    pthread_mutex_lock(&g_bus_lock);
+    for (int i = 0; i < MAX_BUS_REGISTRY; i++) {
+        if (g_bus_reg[i].master == co) {
+            g_bus_reg[i].master = NULL;
+            pthread_mutex_unlock(&g_bus_lock);
+            return;
+        }
+    }
+    pthread_mutex_unlock(&g_bus_lock);
+}
+
+/* 持锁版本 (调用者已持 g_bus_lock) */
+static MiraCoMaster* find_master_locked(const char *ifname)
 {
     for (int i = 0; i < MAX_BUS_REGISTRY; i++) {
         if (g_bus_reg[i].master &&
@@ -49,27 +77,17 @@ static MiraCoMaster* find_master(const char *ifname)
     return NULL;
 }
 
-static int reg_master(const char *ifname, MiraCoMaster *co)
+static int reg_master_locked(const char *ifname, MiraCoMaster *co)
 {
     for (int i = 0; i < MAX_BUS_REGISTRY; i++) {
         if (!g_bus_reg[i].master) {
             strncpy(g_bus_reg[i].ifname, ifname, IFNAMSIZ - 1);
-            g_bus_reg[i].ifname[IFNAMSIZ - 1] = '\0';
+            g_bus_reg[i].ifname[IFNAMSIZ - 1] = '0';
             g_bus_reg[i].master = co;
             return 0;
         }
     }
     return -1;
-}
-
-static void unreg_master(MiraCoMaster *co)
-{
-    for (int i = 0; i < MAX_BUS_REGISTRY; i++) {
-        if (g_bus_reg[i].master == co) {
-            g_bus_reg[i].master = NULL;
-            return;
-        }
-    }
 }
 
 /*----------------------------------------------------------------------------
@@ -93,8 +111,9 @@ static int motor_sdo_read_u16(MiraMotor *m, uint16_t idx, uint8_t sub,
                                uint16_t *val)
 {
     uint8_t len = 2;
-    return miraculous_co_sdo_read(m->co, m->node_id, idx, sub,
+    int ret = miraculous_co_sdo_read(m->co, m->node_id, idx, sub,
                                    val, &len, MOTION_SDO_TIMEOUT_MS);
+    return ret;
 }
 
 static int motor_sdo_write_i32(MiraMotor *m, uint16_t idx, uint8_t sub,
@@ -149,6 +168,7 @@ static void on_tpdo1(uint8_t node_id, uint8_t pdo_num,
                               | (data[2] << 16) | (data[3] << 24));
     motor->pdo_vel  = (int32_t)(data[4] | (data[5] << 8)
                               | (data[6] << 16) | (data[7] << 24));
+    __sync_synchronize();
     motor->pdo_valid = true;
     } else if (pdo_num == 3 && len >= 2) {
         /* TPDO3(0x380+nid) 映射: 0x6077 实际转矩 (16位) */
@@ -183,21 +203,29 @@ MiraMotor* miraculous_motor_open(const char *ifname,
             return NULL;
         }
 
-        co = miraculous_co_init(can, baudrate);
+        co = miraculous_co_init(can, baudrate, true);
         if (!co) {
             fprintf(stderr, "[motor] co_init failed\n");
             miraculous_can_close(can);
             return NULL;
         }
-
-        /* 注册到全局表 */
-        if (reg_master(ifname, co) != 0) {
-            fprintf(stderr, "[motor] bus registry full\n");
+        /* 双检锁: 持锁确认无其他线程抢先注册 */
+        pthread_mutex_lock(&g_bus_lock);
+        MiraCoMaster *existing = find_master_locked(ifname);
+        if (existing) {
+            /* 其他线程已注册, 释放新创建的, 使用已有的 */
+            pthread_mutex_unlock(&g_bus_lock);
+            miraculous_co_free(co);
+            co = existing;
+        } else {
+            /* 注册到全局表 */
+            reg_master_locked(ifname, co);
+            pthread_mutex_unlock(&g_bus_lock);
         }
+        miraculous_co_ref_inc(co);
     } else {
         miraculous_co_ref_inc(co);
     }
-
     /* 创建电机句柄 */
     MiraMotor *motor = calloc(1, sizeof(MiraMotor));
     if (!motor) {
@@ -207,17 +235,26 @@ MiraMotor* miraculous_motor_open(const char *ifname,
 
     motor->co      = co;
     motor->node_id = node_id;
+    co->motor_by_node[node_id] = motor;
     motor->encoder_bw = 19;  /* 默认 19-bit (524288 counts/rev), 用户可改 */
     motor->reduction_ratio = 100.0f; /* 默认减速比 100 */
 
     /* 注册 TPDO2(0x280+nid) 回调: 固件映射 0x6064(位置)+0x606C(速度) */
-    miraculous_co_pdo_set_tpdo_callback(co, node_id, 2,
+    int ret2 = miraculous_co_pdo_set_tpdo_callback(co, node_id, 2,
                                          CO_COB_TPDO2 + node_id,
                                          on_tpdo1, motor);
+    if (ret2 < 0) {
+        fprintf(stderr, "[motor] TPDO2 callback register failed for node %d: %s\n",
+                node_id, mrc_strerror(ret2));
+    }
     /* 注册 TPDO3(0x380+nid) 回调: 固件映射 0x6077(转矩) */
-    miraculous_co_pdo_set_tpdo_callback(co, node_id, 3,
+    int ret3 = miraculous_co_pdo_set_tpdo_callback(co, node_id, 3,
                                          CO_COB_TPDO3 + node_id,
                                          on_tpdo1, motor);
+    if (ret3 < 0) {
+        fprintf(stderr, "[motor] TPDO3 callback register failed for node %d: %s\n",
+                node_id, mrc_strerror(ret3));
+    }
 
     printf("[motor] opened: iface=%s node=%d (refcount=%d)\n",
            ifname, node_id, miraculous_co_ref_count(co));
@@ -231,11 +268,26 @@ void miraculous_motor_close(MiraMotor *motor)
     uint8_t nid = motor->node_id;
     MiraCoMaster *co = motor->co;
 
-    /* 定时器 SYNC 模式下需要停止后台定时器 */
+    /* 如果该电机启动过 SYNC, 递减 SYNC 引用计数
+     * 只有最后一个引用者才真正停掉 timerfd */
     if (motor->sync_active && co) {
         miraculous_co_sync_stop(co);
     }
 
+    /* 清理异步 SDO 任务 */
+    pthread_mutex_lock(&motor->sdo_async_lock);
+    {
+        MiraSdoAsyncTask *t = motor->sdo_async_list;
+        while (t) {
+            MiraSdoAsyncTask *next = t->next;
+            free(t);
+            t = next;
+        }
+        motor->sdo_async_list = NULL;
+    }
+    pthread_mutex_unlock(&motor->sdo_async_lock);
+    pthread_mutex_destroy(&motor->sdo_async_lock);
+    co->motor_by_node[nid] = NULL;
     free(motor);
 
     /* co_free 内部会减 refcount, 仅当最后一个 motor 时才真正释放 */
@@ -325,12 +377,6 @@ int miraculous_motor_tpdo_config(MiraMotor *motor, uint8_t pdo_num,
                                           mapped_count, mappings);
 }
 
-int miraculous_motor_poll(MiraMotor *motor, int timeout_ms)
-{
-    if (!motor || !motor->co) return MRC_ERROR_INVALID_PARAM;
-    return miraculous_co_poll(motor->co, timeout_ms);
-}
-
 MiraCanCtx* miraculous_motor_get_can_ctx(MiraMotor *motor)
 {
     if (!motor || !motor->co) return NULL;
@@ -357,7 +403,6 @@ int miraculous_motor_nmt_send(MiraMotor *motor, CoNmtCommand_t cmd)
 /*----------------------------------------------------------------------------
  * 状态机控制
  *----------------------------------------------------------------------------*/
-#define SHUTDOWN_SDO_TIMEOUT_MS 15
 
 int miraculous_motor_shutdown(MiraMotor *motor)
 {
@@ -438,8 +483,12 @@ int miraculous_motor_full_enable(MiraMotor *motor)
     int ret;
     Cia402State_t initial;
 
-    /* 先检查当前状态 */
+    /* 先检查当前状态 (SDO 可能在总线繁忙时超时, 重试一次) */
     ret = miraculous_motor_get_state(motor, &initial);
+    if (ret < 0) {
+        usleep(50000);
+        ret = miraculous_motor_get_state(motor, &initial);
+    }
     if (ret < 0) return ret;
 
     if (initial == CIA_STATE_FAULT || initial == CIA_STATE_FAULT_REACTION_ACTIVE) {
@@ -463,6 +512,47 @@ int miraculous_motor_full_enable(MiraMotor *motor)
         /* 等待进入 Switch On Disabled */
         ret = miraculous_motor_wait_state(motor, CIA_STATE_SWITCH_ON_DISABLED, 1000);
         if (ret < 0) return ret;
+        initial = CIA_STATE_SWITCH_ON_DISABLED;
+    }
+
+    /* 根据初始状态智能选择转换路径，避免从错误的状态发 Shutdown
+     * (如 Ready to Switch On 发 0x06 会回退到 Switch On Disabled) */
+retry_state:
+    switch (initial) {
+    case CIA_STATE_OPERATION_ENABLED:
+        printf("[motor] node %d already enabled\n", motor->node_id);
+        return MRC_SUCCESS;
+
+    case CIA_STATE_SWITCHED_ON:
+        /* 已处于 Switched On，跳过 Step 1 和 Step 2 */
+        goto step3;
+
+    case CIA_STATE_READY_TO_SWITCH_ON:
+        /* 已处于 Ready to Switch On，跳过 Step 1 */
+        goto step2;
+
+    case CIA_STATE_SWITCH_ON_DISABLED:
+    case CIA_STATE_QUICK_STOP_ACTIVE:
+        /* 从 Step 1 开始正常序列 */
+        break;
+
+    case CIA_STATE_NOT_READY_TO_SWITCH_ON:
+        /* 设备初始化为瞬态, 最多重试 3 次 */
+        for (int attempt = 0; attempt < 3; attempt++) {
+            printf("[motor] node %d not ready, waiting 200ms...\n",
+                   motor->node_id);
+            usleep(200000);
+            ret = miraculous_motor_get_state(motor, &initial);
+            if (ret < 0) return ret;
+            if (initial != CIA_STATE_NOT_READY_TO_SWITCH_ON)
+                goto retry_state;
+        }
+        printf("[motor] node %d still not ready after 3 attempts\n",
+               motor->node_id);
+        return MRC_ERROR_TIMEOUT;
+
+    default:
+        break;
     }
 
     /* Step 1: Shutdown → Ready to Switch On (0x06) */
@@ -471,12 +561,14 @@ int miraculous_motor_full_enable(MiraMotor *motor)
     ret = miraculous_motor_wait_state(motor, CIA_STATE_READY_TO_SWITCH_ON, 1000);
     if (ret < 0) return ret;
 
+step2:
     /* Step 2: Switch On → Switched On (0x07) */
     ret = miraculous_motor_switch_on(motor);
     if (ret < 0) return ret;
     ret = miraculous_motor_wait_state(motor, CIA_STATE_SWITCHED_ON, 1000);
     if (ret < 0) return ret;
 
+step3:
     /* Step 3: Enable Operation → Operation Enabled (0x0F) */
     {
         uint16_t cw = CIA402_CW_ENABLE_OPERATION;
@@ -484,7 +576,7 @@ int miraculous_motor_full_enable(MiraMotor *motor)
                            CIA402_OD_CONTROLWORD, 0, &cw, MOTION_SDO_TIMEOUT_MS);
     }
     if (ret < 0) return ret;
-    ret = miraculous_motor_wait_state(motor, CIA_STATE_OPERATION_ENABLED,4000);
+    ret = miraculous_motor_wait_state(motor, CIA_STATE_OPERATION_ENABLED, 4000);
     if (ret < 0) return ret;
 
     printf("[motor] node %d fully enabled\n", motor->node_id);
@@ -556,9 +648,14 @@ int miraculous_motor_set_mode(MiraMotor *motor, Cia402Mode_t mode)
 {
     if (!motor) return MRC_ERROR_INVALID_PARAM;
     int8_t m = (int8_t)mode;
-    return CO_SDO_WRITE(motor->co, motor->node_id,
-                        CIA402_OD_MODES_OF_OPERATION, 0,
-                        &m, 30);  /* 模式切换给 30ms, 总线繁忙时更稳定 */
+    int ret = CO_SDO_WRITE(motor->co, motor->node_id,
+                           CIA402_OD_MODES_OF_OPERATION, 0,
+                           &m, SET_MODE_SDO_TIMEOUT_MS);
+    if (ret < 0) {
+        fprintf(stderr, "[motor] set_mode node=%d mode=0x%02X failed: %s (err=%d)\n",
+                motor->node_id, (unsigned)mode, mrc_strerror(ret), ret);
+    }
+    return ret;
 }
 
 int miraculous_motor_get_mode(MiraMotor *motor, Cia402Mode_t *mode)
@@ -590,7 +687,7 @@ int miraculous_motor_get_supported_modes(MiraMotor *motor, uint32_t *modes)
 int miraculous_motor_get_position(MiraMotor *motor, int32_t *pos)
 {
     if (!motor || !pos) return MRC_ERROR_INVALID_PARAM;
-    miraculous_co_poll(motor->co, 0);
+    __sync_synchronize();
     if (motor->pdo_valid) {
         *pos = motor->pdo_pos;
         return MRC_SUCCESS;
@@ -683,7 +780,7 @@ int miraculous_motor_sync_send(MiraMotor *motor)
 int miraculous_motor_get_velocity(MiraMotor *motor, int32_t *vel)
 {
     if (!motor || !vel) return MRC_ERROR_INVALID_PARAM;
-    miraculous_co_poll(motor->co, 0);
+    __sync_synchronize();
     if (motor->pdo_valid) {
         *vel = motor->pdo_vel;
         return MRC_SUCCESS;
@@ -953,6 +1050,111 @@ int miraculous_motor_sdo_write(MiraMotor *motor,
     return miraculous_co_sdo_write(motor->co, motor->node_id,
                                     index, subindex, data, len,
                                     MOTION_SDO_TIMEOUT_MS);
+}
+
+/*----------------------------------------------------------------------------
+ * 异步 SDO 读写
+ *----------------------------------------------------------------------------*/
+
+/** 分配异步任务节点 */
+static MiraSdoAsyncTask* async_sdo_alloc(MiraMotor *motor)
+{
+    MiraSdoAsyncTask *t = calloc(1, sizeof(MiraSdoAsyncTask));
+    if (!t) return NULL;
+
+    pthread_mutex_lock(&motor->sdo_async_lock);
+    t->tid = motor->sdo_async_tid_seed++;
+    t->next = motor->sdo_async_list;
+    motor->sdo_async_list = t;
+    pthread_mutex_unlock(&motor->sdo_async_lock);
+    return t;
+}
+
+/** 释放异步任务 (从链表移除) */
+static void async_sdo_free(MiraMotor *motor, MiraSdoAsyncTask *task)
+{
+    if (!task) return;
+    pthread_mutex_lock(&motor->sdo_async_lock);
+    MiraSdoAsyncTask **p = &motor->sdo_async_list;
+    while (*p) {
+        if (*p == task) {
+            *p = task->next;
+            free(task);
+            break;
+        }
+        p = &(*p)->next;
+    }
+    pthread_mutex_unlock(&motor->sdo_async_lock);
+}
+
+int miraculous_motor_sdo_read_async(MiraMotor *motor, uint16_t idx,
+                                     uint8_t subidx, MiraSdoCallback cb,
+                                     void *user_data, int *tid_out)
+{
+    if (!motor || !cb || !tid_out) return MRC_ERROR_INVALID_PARAM;
+
+    MiraSdoAsyncTask *task = async_sdo_alloc(motor);
+    if (!task) return MRC_ERROR_RESOURCE_BUSY;
+
+    task->index = idx;
+    task->subindex = subidx;
+    task->is_write = false;
+    task->cb = cb;
+    task->user_data = user_data;
+    clock_gettime(CLOCK_MONOTONIC, &task->expire_ts);
+    task->expire_ts.tv_sec += 1; /* 默认 1s 超时 */
+
+    uint8_t req[8] = { CO_SDO_CCS_UPLOAD_INITIATE,
+                       (uint8_t)(idx & 0xFF), (uint8_t)((idx >> 8) & 0xFF),
+                       subidx, 0, 0, 0, 0 };
+    int ret = miraculous_can_send(miraculous_co_get_can(motor->co), 
+                                   CO_COB_SDO_RX + motor->node_id, req, 8);
+    if (ret < 0) {
+        async_sdo_free(motor, task);
+        return ret;
+    }
+
+    *tid_out = task->tid;
+    return MRC_SUCCESS;
+}
+
+int miraculous_motor_sdo_write_async(MiraMotor *motor, uint16_t idx,
+                                      uint8_t subidx, const void *data,
+                                      uint8_t len, MiraSdoCallback cb,
+                                      void *user_data, int *tid_out)
+{
+    if (!motor || !cb || !tid_out || len > 4)
+        return MRC_ERROR_INVALID_PARAM;
+
+    MiraSdoAsyncTask *task = async_sdo_alloc(motor);
+    if (!task) return MRC_ERROR_RESOURCE_BUSY;
+
+    task->index = idx;
+    task->subindex = subidx;
+    task->is_write = true;
+    task->cb = cb;
+    task->user_data = user_data;
+    clock_gettime(CLOCK_MONOTONIC, &task->expire_ts);
+    task->expire_ts.tv_sec += 1;
+
+    uint8_t req[8];
+    memset(req, 0, 8);
+    req[0] = CO_SDO_CCS_DOWNLOAD_INITIATE | CO_SDO_EXPEDITED
+           | CO_SDO_SIZE_INDICATED | (uint8_t)((4 - len) << 2);
+    req[1] = (uint8_t)(idx & 0xFF);
+    req[2] = (uint8_t)((idx >> 8) & 0xFF);
+    req[3] = subidx;
+    memcpy(&req[4], data, len);
+
+    int ret = miraculous_can_send(miraculous_co_get_can(motor->co),
+                                   CO_COB_SDO_RX + motor->node_id, req, 8);
+    if (ret < 0) {
+        async_sdo_free(motor, task);
+        return ret;
+    }
+
+    *tid_out = task->tid;
+    return MRC_SUCCESS;
 }
 
 /*----------------------------------------------------------------------------

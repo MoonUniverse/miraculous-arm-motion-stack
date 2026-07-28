@@ -14,29 +14,34 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/timerfd.h>
+#include <sys/epoll.h>
 #include <stdint.h>
 
 #include "miraculous_internal.h"
 
-typedef struct SyncCtx_t {
-    MiraCanCtx *can;
-    int         timer_fd;
-    bool        running;
-} SyncCtx_t;
+/* SyncCtx_t 定义已移至 miraculous_internal.h */
 
 SyncCtx_t* co_sync_create(void)
 {
     SyncCtx_t *ctx = calloc(1, sizeof(SyncCtx_t));
     if (!ctx) return NULL;
     ctx->timer_fd = -1;
+    pthread_mutex_init(&ctx->lock, NULL);
     return ctx;
 }
 
 void co_sync_destroy(SyncCtx_t *ctx)
 {
     if (!ctx) return;
-    miraculous_co_sync_stop(NULL); /* 内部 stop */
-    if (ctx->timer_fd >= 0) close(ctx->timer_fd);
+    pthread_mutex_lock(&ctx->lock);
+    if (ctx->running && ctx->timer_fd >= 0) {
+        close(ctx->timer_fd);
+        ctx->timer_fd = -1;
+    }
+    ctx->running = false;
+    ctx->refcount = 0;
+    pthread_mutex_unlock(&ctx->lock);
+    pthread_mutex_destroy(&ctx->lock);
     free(ctx);
 }
 
@@ -50,8 +55,19 @@ int miraculous_co_sync_start(MiraCoMaster *co, uint32_t period_us)
     SyncCtx_t *sync = miraculous_co_get_sync(co);
     if (!sync) return MRC_ERROR_NOT_INIT;
 
+    pthread_mutex_lock(&sync->lock);
+
+    /* 已经在运行且周期相同 — 只增加引用计数, 不重建 timerfd */
+    if (sync->running && sync->period_us == period_us && sync->timer_fd >= 0) {
+        sync->refcount++;
+        pthread_mutex_unlock(&sync->lock);
+        printf("[sync] refcount++ -> %d (period=%u us already running)\n",
+               sync->refcount, period_us);
+        return MRC_SUCCESS;
+    }
+
+    /* 周期不同或首次启动 — 需要重建 timerfd */
     if (sync->timer_fd >= 0) {
-        /* 已启动，先停 */
         close(sync->timer_fd);
         sync->timer_fd = -1;
     }
@@ -59,6 +75,7 @@ int miraculous_co_sync_start(MiraCoMaster *co, uint32_t period_us)
     sync->timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
     if (sync->timer_fd < 0) {
         perror("[sync] timerfd_create");
+        pthread_mutex_unlock(&sync->lock);
         return MRC_ERROR_CAN_SOCKET;
     }
 
@@ -74,10 +91,17 @@ int miraculous_co_sync_start(MiraCoMaster *co, uint32_t period_us)
         perror("[sync] timerfd_settime");
         close(sync->timer_fd);
         sync->timer_fd = -1;
+        pthread_mutex_unlock(&sync->lock);
         return MRC_ERROR_CAN_SOCKET;
     }
 
     sync->running = true;
+    sync->period_us = period_us;
+    sync->refcount = 1;
+
+    /* timerfd 由接收线程的 local epoll 统一监听，到期后调用 co_sync_handle_tick */
+
+    pthread_mutex_unlock(&sync->lock);
     printf("[sync] started: period=%u us (fd=%d)\n",
            period_us, sync->timer_fd);
     return MRC_SUCCESS;
@@ -88,11 +112,28 @@ int miraculous_co_sync_stop(MiraCoMaster *co)
     SyncCtx_t *sync = miraculous_co_get_sync(co);
     if (!sync) return MRC_ERROR_NOT_INIT;
 
+    pthread_mutex_lock(&sync->lock);
+
+    if (sync->refcount <= 0) {
+        pthread_mutex_unlock(&sync->lock);
+        return MRC_SUCCESS; /* 已经停了 */
+    }
+
+    sync->refcount--;
+    if (sync->refcount > 0) {
+        pthread_mutex_unlock(&sync->lock);
+        printf("[sync] refcount-- -> %d (still running)\n", sync->refcount);
+        return MRC_SUCCESS;
+    }
+
+    /* 最后一个引用者 — 真正停掉 timerfd */
     sync->running = false;
     if (sync->timer_fd >= 0) {
         close(sync->timer_fd);
         sync->timer_fd = -1;
     }
+    sync->period_us = 0;
+    pthread_mutex_unlock(&sync->lock);
     printf("[sync] stopped\n");
     return MRC_SUCCESS;
 }
@@ -112,7 +153,7 @@ int miraculous_co_sync_fd(MiraCoMaster *co)
     return sync ? sync->timer_fd : -1;
 }
 
-/* 在 poll 中处理 timerfd 到期事件 (由 co_master.c 调用) */
+/* 在接收线程中处理 timerfd 到期事件 (由 co_master.c 调用) */
 void co_sync_handle_tick(SyncCtx_t *ctx)
 {
     if (!ctx || ctx->timer_fd < 0 || !ctx->running) return;

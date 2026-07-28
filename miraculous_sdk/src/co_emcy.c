@@ -13,7 +13,7 @@
 #include <string.h>
 #include "miraculous_internal.h"
 
-typedef struct {
+typedef struct EmcyCtx_t {
     MiraEmcyCallback callback;
     void            *user_data;
 } EmcyCtx_t;

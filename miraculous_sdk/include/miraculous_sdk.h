@@ -64,6 +64,7 @@ typedef enum {
     MRC_ERROR_CO_PDO_CONFIG          = -26,  /*!< PDO 配置失败 */
     MRC_ERROR_CO_HEARTBEAT_LOST      = -27,  /*!< 心跳丢失 */
     MRC_ERROR_CO_WRONG_NMT_STATE     = -28,  /*!< 当前 NMT 状态不允许此操作 */
+    MRC_ERROR_RESOURCE_BUSY           = -29,  /*!< 资源繁忙 (异步任务池满) */
 
     /*--- CiA402 运动控制层 (-30 ~ -39) ---*/
     MRC_ERROR_MOTION_STATE_TRANSITION = -30,  /*!< 状态转换失败 (超时) */
@@ -238,46 +239,8 @@ typedef enum {
     CIA_ERROR_MONITORING  = 0xFF00,
 } Cia402ErrorCode_t;
 
-/*--- CAN 帧结构 (TCP/UDP 回环 / 原始帧) ---*/
-#define CAN_DATA_MAX  64  /*!< CAN FD 最大数据长度 */
-
-typedef struct {
-    uint32_t can_id;        /*!< CAN ID */
-    uint8_t  can_dlc;       /*!< 数据长度 */
-    uint8_t  __pad;         /*!< 填充 */
-    uint8_t  __res0;        /*!< 保留 */
-    uint8_t  __res1;        /*!< 保留 */
-    uint8_t  data[CAN_DATA_MAX];  /*!< 数据 */
-} MiraCanFrame_t;
 
 /*--- 回调函数类型 ---*/
-
-/**
- * @brief CAN 帧接收回调函数类型
- *
- * 注册方式: 通过 miraculous_can_set_recv_callback() 设置。
- *
- * 使用示例:
- * @code{.c}
- * void my_can_recv(uint32_t can_id, const uint8_t *data,
- *                   uint8_t len, void *user_data)
- * {
- *     printf("RX: id=0x%03X len=%d data=", can_id, len);
- *     for (int i = 0; i < len; i++)
- *         printf("%02X ", data[i]);
- *     printf("\n");
- * }
- *
- * miraculous_can_set_recv_callback(ctx, my_can_recv, NULL);
- * @endcode
- *
- * @param can_id    CAN 帧 ID (标准帧 11 位或扩展帧 29 位)
- * @param data      帧数据缓冲区
- * @param len       数据长度 (字节)
- * @param user_data 注册时传入的用户自定义数据
- */
-typedef void (*MiraCanRecvCallback)(uint32_t can_id, const uint8_t *data,
-                                     uint8_t len, void *user_data);
 
 /**
  * @brief 紧急事件 (EMCY) 回调函数类型
@@ -399,12 +362,13 @@ void miraculous_can_close(MiraCanCtx *ctx);
 int miraculous_can_set_bitrate(MiraCanCtx *ctx, CiaBaudrate_t baudrate);
 
 /**
- * @brief 检测 CAN 接口是否支持 CAN FD
+ * @brief 获取 CAN socket 文件描述符
  *
  * @param ctx CAN 上下文句柄
- * @return 支持返回 1, 不支持返回 0, 失败返回负值
+ * @return socket fd (>=0), 无效上下文返回 -1
  */
 int miraculous_can_fd(MiraCanCtx *ctx);
+int miraculous_can_get_epoll_fd(MiraCanCtx *ctx);
 
 /**
  * @brief 发送标准 CAN 帧
@@ -417,30 +381,6 @@ int miraculous_can_fd(MiraCanCtx *ctx);
  */
 int miraculous_can_send(MiraCanCtx *ctx, uint32_t can_id,
                         const uint8_t *data, uint8_t len);
-
-/**
- * @brief 发送 MiraCanFrame_t 格式的 CAN 帧
- *
- * @param ctx   CAN 上下文句柄
- * @param frame 待发送的帧结构指针
- * @return 成功返回 0, 失败返回其他
- */
-int miraculous_can_send_frame(MiraCanCtx *ctx, const MiraCanFrame_t *frame);
-
-/**
- * @brief 注册 CAN 帧接收回调函数
- *
- * 注册后所有收到的 CAN 帧会通过回调函数异步通知,
- * 若无需异步接收可调用 miraculous_can_recv_timeout() 同步读取。
- *
- * @param ctx       CAN 上下文句柄
- * @param cb        回调函数, 收到帧时被调用
- * @param user_data 用户自定义数据, 传入回调
- * @return 成功返回 0, 失败返回其他
- */
-int miraculous_can_set_recv_callback(MiraCanCtx *ctx,
-                                      MiraCanRecvCallback cb,
-                                      void *user_data);
 
 /**
  * @brief 同步方式接收匹配指定 ID 的 CAN 帧 (带超时)
@@ -464,6 +404,24 @@ int miraculous_can_recv_timeout(MiraCanCtx *ctx, uint32_t can_id,
  * @return 处理的事件数
  */
 int miraculous_can_poll(MiraCanCtx *ctx, int timeout_ms);
+
+/**
+ * @brief 设置 CAN 帧接收回调 (异步事件驱动模式)
+ *
+ * 注册的回调将在调用 miraculous_can_poll() 或接收线程中,
+ * 收到匹配的 CAN 帧时被调用。
+ *
+ * @param ctx       CAN 上下文句柄
+ * @param callback  回调函数, 设置为 NULL 可取消之前的注册
+ * @param user_data 用户自定义数据, 透传给回调
+ * @return 成功返回 0, 失败返回负值
+ */
+int miraculous_can_set_recv_callback(MiraCanCtx *ctx,
+                                     void (*callback)(uint32_t can_id,
+                                                       const uint8_t *data,
+                                                       uint8_t len,
+                                                       void *user_data),
+                                     void *user_data);
 
 /*============================================================================*
  * CiA402 运动控制 API
@@ -1454,14 +1412,6 @@ int miraculous_motor_tpdo_config(MiraMotor *motor, uint8_t pdo_num,
  * @param timeout_ms 超时毫秒
  * @return 处理的事件数
  */
-int miraculous_motor_poll(MiraMotor *motor, int timeout_ms);
-
-/**
- * @brief 通过电机总线的 CAN 上下文访问 (高级用法)
- * @param motor 电机句柄
- * @return CAN 上下文, 可能为 NULL
- */
-MiraCanCtx* miraculous_motor_get_can_ctx(MiraMotor *motor);
 
 /*--- 底层 SDO 读写 (高级用法) ---*/
 
@@ -1506,6 +1456,55 @@ int miraculous_motor_sdo_write(MiraMotor *motor,
  * @return 节点 ID (1~127)
  */
 uint8_t miraculous_motor_get_node_id(MiraMotor *motor);
+
+/**
+ * @brief 获取电机关联的 CAN 上下文
+ *
+ * @param motor 电机句柄
+ * @return CAN 上下文指针, 失败返回 NULL
+ */
+MiraCanCtx* miraculous_motor_get_can_ctx(MiraMotor *motor);
+
+/*--- 异步 SDO 回调 / API ---*/
+
+/** SDO 异步操作结果状态 */
+typedef enum {
+    MIRA_SDO_OK      = 0,  /**< SDO 成功 */
+    MIRA_SDO_TIMEOUT = 1,  /**< SDO 超时 */
+    MIRA_SDO_ABORT   = 2,  /**< SDO 被从站中止 */
+} MiraSdoStatus_t;
+
+/**
+ * @brief SDO 异步回调函数
+ * @param motor    电机句柄
+ * @param tid      事务 ID
+ * @param index    OD 索引
+ * @param subindex OD 子索引
+ * @param status   结果状态
+ * @param data     响应数据
+ * @param len      数据长度
+ * @param user_data 用户注册参数
+ */
+typedef void (*MiraSdoCallback)(MiraMotor *motor, int tid,
+                                 uint16_t index, uint8_t subindex,
+                                 MiraSdoStatus_t status,
+                                 const uint8_t *data, uint8_t len,
+                                 void *user_data);
+
+/**
+ * @brief 异步 SDO 读 — 立即返回, 响应到达时触发回调
+ */
+int miraculous_motor_sdo_read_async(MiraMotor *motor, uint16_t idx,
+                                     uint8_t subidx, MiraSdoCallback cb,
+                                     void *user_data, int *tid_out);
+
+/**
+ * @brief 异步 SDO 写 — 立即返回, 响应到达时触发回调
+ */
+int miraculous_motor_sdo_write_async(MiraMotor *motor, uint16_t idx,
+                                      uint8_t subidx, const void *data,
+                                      uint8_t len, MiraSdoCallback cb,
+                                      void *user_data, int *tid_out);
 
 #ifdef __cplusplus
 }

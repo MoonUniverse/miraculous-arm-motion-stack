@@ -46,7 +46,7 @@ static int read_from_motor(MiraMotor *motor,
     }
 
     /* 读取零点位置 0x2007 sub1~poles */
-    for (int i = 0; i < *poles; i++) {
+    for (int i = 0; i <= *poles; i++) {
         len = 4;
         ret = miraculous_motor_sdo_read(motor, CIA402_OD_ENC_ZERO_POINT,
                                          (uint8_t)(i + 1),
@@ -59,7 +59,7 @@ static int read_from_motor(MiraMotor *motor,
     }
 
     /* 读取零点 Ki 值 0x2008 sub1~poles */
-    for (int i = 0; i < *poles; i++) {
+    for (int i = 0; i <= *poles; i++) {
         len = 4;
         ret = miraculous_motor_sdo_read(motor, CIA402_OD_ENC_ZERO_KI,
                                          (uint8_t)(i + 1),
@@ -79,7 +79,7 @@ static int write_to_motor(MiraMotor *motor,
     int ret;
 
     /* 写入零点位置 0x2007 sub1~poles */
-    for (int i = 0; i < poles; i++) {
+    for (int i = 0; i <= poles; i++) {
         ret = miraculous_motor_sdo_write(motor, CIA402_OD_ENC_ZERO_POINT,
                                           (uint8_t)(i + 1),
                                           &zero_point[i], 4);
@@ -91,7 +91,7 @@ static int write_to_motor(MiraMotor *motor,
     }
 
     /* 写入零点 Ki 值 0x2008 sub1~poles */
-    for (int i = 0; i < poles; i++) {
+    for (int i = 0; i <= poles; i++) {
         ret = miraculous_motor_sdo_write(motor, CIA402_OD_ENC_ZERO_KI,
                                           (uint8_t)(i + 1),
                                           &zero_ki[i], 4);
@@ -120,9 +120,9 @@ static int save_to_file(const char *filename, int poles,
     }
 
     fprintf(fp, "poles=%d\n", poles);
-    for (int i = 0; i < poles; i++)
+    for (int i = 0; i <= poles; i++)
         fprintf(fp, "zero_point[%d]=%d\n", i, zero_point[i]);
-    for (int i = 0; i < poles; i++) {
+    for (int i = 0; i <= poles; i++) {
         uint32_t raw;
         memcpy(&raw, &zero_ki[i], 4);
         fprintf(fp, "zero_ki[%d]=0x%08X  (%g)\n", i, raw, zero_ki[i]);
@@ -174,7 +174,7 @@ static int load_from_file(const char *filename, int *poles,
     }
 
     /* 将 uint32 原始字节转为 float */
-    for (int i = 0; i < *poles; i++)
+    for (int i = 0; i <= *poles; i++)
         memcpy(&zero_ki[i], &raw_ki[i], 4);
 
     printf("Loaded from %s (%d poles)\n", filename, *poles);
@@ -186,7 +186,7 @@ static void print_data(int poles, int32_t *zero_point, float *zero_ki)
     printf("Poles: %d\n\n", poles);
     printf("  # | zero_point    | zero_ki (hex)    | zero_ki\n");
     printf("----|---------------|------------------|------------\n");
-    for (int i = 0; i < poles; i++) {
+    for (int i = 0; i <= poles; i++) {
         uint32_t raw;
         memcpy(&raw, &zero_ki[i], 4);
         printf("  %2d | %11d | 0x%08X | %.6f\n",

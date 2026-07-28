@@ -15,6 +15,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <time.h>
+#include <unistd.h>
 #include "miraculous_internal.h"
 
 int miraculous_motor_pp_move(MiraMotor *motor,
@@ -27,15 +28,8 @@ int miraculous_motor_pp_move(MiraMotor *motor,
 {
     if (!motor) return MRC_ERROR_INVALID_PARAM;
 
-    /* Step 1: 设置模式为 PP */
-    int ret = miraculous_motor_set_mode(motor, CIA_MODE_PP);
-    if (ret < 0) {
-        fprintf(stderr, "[pp] set mode failed\n");
-        return ret;
-    }
-
-    /* Step 2: 设置轨迹参数 */
-    ret = CO_SDO_WRITE(motor->co, motor->node_id,
+    /* Step 1: 设置轨迹参数 */
+    int ret = CO_SDO_WRITE(motor->co, motor->node_id,
                        CIA402_OD_PROFILE_VELOCITY, 0,
                        &profile_vel, 100);
     if (ret < 0) return ret;
@@ -114,6 +108,6 @@ int miraculous_motor_pp_wait_target(MiraMotor *motor, int timeout_ms)
 
         int remaining = (int)(timeout_ms - elapsed);
         if (remaining > 10) remaining = 10;
-        miraculous_co_poll(motor->co, remaining);
+        usleep(remaining * 1000);
     }
 }

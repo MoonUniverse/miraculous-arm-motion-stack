@@ -59,13 +59,7 @@ int main(int argc, char **argv)
         /* 发送 NMT 心跳请求 (广播) */
         uint8_t nmt_data[] = {0x00, 0x00}; /* CS + Node-ID */
         miraculous_can_send(can, 0x000, nmt_data, 2);
-
-        /* 轮询接收事件 */
-        int n = miraculous_can_poll(can, 100); /* 100ms 超时 */
-        if (n < 0) {
-            fprintf(stderr, "Poll error: %s\n", mrc_strerror(n));
-            break;
-        }
+        usleep(100000);
     }
 
     miraculous_can_close(can);

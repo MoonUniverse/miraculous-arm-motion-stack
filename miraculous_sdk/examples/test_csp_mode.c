@@ -30,7 +30,7 @@
 #define STEP_SIZE           (524288*4/10/360) // 0.4 度
 
 /* 每次下发后等待电机到位的时间 (us) */
-#define SETTLE_TIME_US     15000 /* 10 ms */
+#define SETTLE_TIME_US     20000 /* 10 ms */
 
 /* 速度判零阈值 (脉冲/s) */
 #define VELOCITY_ZERO_THRESHOLD  10
@@ -73,10 +73,33 @@ int main(int argc, char **argv)
     if (!motor) { fprintf(stderr, "Failed to open motor\n"); return -1; }
 
     /* NMT Start */
-    if (miraculous_motor_bootstrap(motor, 3000) < 0) goto cleanup;
+    if (miraculous_motor_bootstrap(motor, 3000) < 0) {
+        fprintf(stderr, "bootstrap failed\n");
+        goto cleanup;
+    }
+
+    /* 检查 Fault 状态并在必要时复位 */
+    {
+        Cia402State_t st;
+        if (miraculous_motor_get_state(motor, &st) == 0 &&
+            (st == CIA_STATE_FAULT || st == CIA_STATE_FAULT_REACTION_ACTIVE)) {
+            printf("[main] node %d in Fault state, resetting...\n", node_id);
+            if (miraculous_motor_fault_reset(motor) < 0) {
+                fprintf(stderr, "fault_reset failed\n");
+                goto cleanup;
+            }
+        }
+    }
 
     /* 设模式 → 使能 → init */
-    if (miraculous_motor_set_mode(motor, CIA_MODE_CSP) < 0) goto cleanup;
+    {
+        int mode_ret = miraculous_motor_set_mode(motor, CIA_MODE_CSP);
+        if (mode_ret < 0) {
+            fprintf(stderr, "set_mode(CIA_MODE_CSP) failed: %s (err=%d)\n",
+                    mrc_strerror(mode_ret), mode_ret);
+            goto cleanup;
+        }
+    }
     if (miraculous_motor_full_enable(motor) < 0) {
         uint16_t sw = 0;
         uint16_t err = 0;
@@ -244,7 +267,13 @@ int main(int argc, char **argv)
     }
 
 shutdown:
-    miraculous_motor_shutdown(motor);
+    {
+        int shutdown_ret = miraculous_motor_shutdown(motor);
+        if (shutdown_ret < 0) {
+            fprintf(stderr, "[main] shutdown failed: %s (err=%d)\n",
+                    mrc_strerror(shutdown_ret), shutdown_ret);
+        }
+    }
 
 cleanup:
     miraculous_motor_close(motor);

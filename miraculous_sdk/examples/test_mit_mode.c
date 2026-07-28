@@ -44,6 +44,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "Bootstrap failed\n");
         goto cleanup;
     }
+    /* 设模式 → 使能 */
+    if (miraculous_motor_set_mode(motor, CIA_MODE_MIT) < 0) goto cleanup;
     if (miraculous_motor_full_enable(motor) < 0) {
         fprintf(stderr, "Enable failed\n");
         goto cleanup;

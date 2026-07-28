@@ -135,21 +135,22 @@ CAN 总线 → 6 个电机
 ```
 MiraculousArm::read_loop() [独立线程, 100Hz]
     │  循环:
-    │    1. get_position_ex(..., POS_UNIT_RADIAN) × 6  → joint/load-side rad
-    │    3. get_velocity_ex(..., VEL_SIDE_LOAD, VEL_UNIT_RAD_S) × 6
-    │    3. get_state(motor[i])   × 6  → Cia402State_t
-    │    4. motor_poll(motor[0], 0)    → 处理 CAN 事件/EMCY 回调
-    │    5. mutex lock → 缓存更新 (joint-side rad + load-side rad/s)
-    │    6. sleep_until(next_period)
+    │    1. 未使能时记录各节点 TPDO2 generation 并发送一帧 SYNC
+    │    2. condition_variable 等待 SDK 接收线程送回完整的新 TPDO2 组
+    │    3. get_position_ex(..., POS_UNIT_RADIAN) × 6  → joint/load-side rad
+    │    4. get_velocity_ex(..., VEL_SIDE_LOAD, VEL_UNIT_RAD_S) × 6
+    │    5. 按配置低频 get_state(motor[i]) × 6 → Cia402State_t
+    │    6. mutex lock → 缓存更新 (joint-side rad + load-side rad/s)
+    │    7. sleep_until(next_period)
     ▼
 read() 调用方 (ros2_control / playback)
     → mutex lock → 拷贝缓存 (非阻塞)
 ```
 
 `init_passive()` 不启动该线程。示教节点的 wall timer 直接调用
-`read_passive_feedback()`：清空旧待处理帧、记录各节点 TPDO2 generation、发送一帧
-广播 SYNC，并等待所有配置节点 generation 递增后才返回完整样本。超时不会把旧缓存
-当作新样本。
+`read_passive_feedback()`：记录各节点 TPDO2 generation、发送一帧广播 SYNC，并通过
+条件变量等待 SDK 接收线程令所有配置节点 generation 递增后才返回完整样本。超时
+不会把旧缓存当作新样本，driver 不再调用已从新版 SDK 移除的主动 poll API。
 
 ### 3.3 CSP 多轴同步策略
 
@@ -157,7 +158,8 @@ read() 调用方 (ros2_control / playback)
 // init() 中，每个进程只执行一次:
 for (i = 0..5) {
   miraculous_motor_set_mode(motor[i], CIA_MODE_CSP);
-  miraculous_motor_csp_init(motor[i], period, /*manual=*/period == 0);
+  miraculous_motor_csp_init(motor[i], period, /*manual=*/true);
+  if (period != 0) miraculous_motor_sdo_write(motor[i], 0x1006, 0, &period, 4);
 }
 
 // set_targets_rad() 中, manual SYNC 模式:
@@ -166,7 +168,8 @@ miraculous_motor_sync_send(motor[0]);  // 统一 SYNC
 ```
 
 - `sync_period_us == 0` 时使用手动 SYNC，wrapper 在 6 个目标全部写入后调用 SDK 的 `miraculous_motor_sync_send()`
-- `sync_period_us != 0` 时 `csp_init()` 在 `init()` 中配置 SDK 的共享定时器；该定时器跨 start/stop 保留，只在 `shutdown()` 停止
+- `sync_period_us != 0` 时 `init()` 逐轴写 0x1006，但仍用 manual 方式执行
+  `csp_init()`；共享 SDK timer 只在安全使能成功后由首电机启动
 - `enable_csp()` 不再调用 `set_mode()` 或 `csp_init()`，因此连续 start 不会重复配置 CSP
 - 状态字 `0x6041` 通过 SDO 读取，默认不在读线程轮询；需要诊断状态机时再设置 `state_poll_rate_hz > 0`
 
@@ -296,12 +299,13 @@ class MiraculousArm {
 | `miraculous_motor_bootstrap` | `init()` | NMT Reset → Operational |
 | `miraculous_motor_full_enable` | `enable_csp()` / `enable()` | PDS → Operation Enabled |
 | `miraculous_motor_set_mode` | `init()` | 每进程一次，设为 CIA_MODE_CSP |
-| `miraculous_motor_csp_init` | `init()` | 每进程每关节一次，配置 manual/timer SYNC 策略 |
+| `miraculous_motor_csp_init` | `init()` | 每进程每关节一次，统一按 manual 初始化 CSP |
+| `miraculous_motor_sdo_write` | `init()` | timer 模式逐轴写 0x1006，避免多轴 `csp_init` 重复引用共享 timer |
 | `miraculous_motor_csp_set_target_ex` | `set_targets_rad()` | 写入目标位置 (关节输出侧 rad) |
 | `miraculous_motor_get_position_ex` | `read_loop()` | 读取实际位置 (关节输出侧 rad) |
 | `miraculous_motor_get_velocity_ex` | `read_loop()` | 读取实际速度 (负载侧 rad/s) |
 | `miraculous_motor_get_state` | `read_loop()` | 读取 PDS 状态 |
-| `miraculous_motor_poll` | `read_loop()` | 处理 CAN 事件 (TPDO/EMCY 等) |
+| `miraculous_motor_set_tpdo_callback` | `open_motors()` / `shutdown()` | 注册/注销 TPDO generation 回调；收包由 SDK 后台线程负责 |
 | `miraculous_motor_sync_send` | `send_sync()` / `read_loop()`(manual 且 CSP 未激活时) / `refresh_feedback_locked()` | 发送手动 SYNC（TPDO 为 SYNC 触发） |
 | `miraculous_motor_sync_stop` | `shutdown()` | 进程退出时停止共享 SDK 定时 SYNC |
 | `miraculous_motor_set_emcy_callback` | `open_motors()` / `shutdown()` | 注册/注销 EMCY 回调（按总线一次） |
@@ -343,7 +347,7 @@ class MiraculousArm {
 | `record_rate` | `50.0` | 录制频率 (Hz) |
 | `output_file` | `""` (自动时间戳) | CSV 输出路径 |
 | `auto_record` | `false` | 启动即开始录制 |
-| `feedback_timeout_ms` | `2` | 每次 SYNC 等待全部配置节点新 TPDO2 的超时 |
+| `feedback_timeout_ms` | `5` | 每次 SYNC 等待全部配置节点新 TPDO2 的超时 |
 | `max_consecutive_misses` | `10` | 连续超时达到该值时终止当前录制 |
 | `overwrite_existing` | `false` | 是否允许覆盖显式 `output_file` |
 
@@ -595,7 +599,7 @@ install(TARGETS teach_record_node playback_node RUNTIME DESTINATION lib/${PROJEC
 |-------------|---------|
 | `set_mode(CSP) → full_enable → csp_init` 使能顺序 | `test_csp_ex.c:74-83`（bootstrap 提前到 `init()`，等效） |
 | 手动 SYNC：6 关节全部 `csp_set_target_ex` 后发一帧统一 SYNC | `test_csp_ex.c:134-143`；SYNC 是广播帧，一帧同沿锁存全部轴 |
-| poll 第一个电机、读所有电机 TPDO 缓存 | `test_sync_read.c:75-88` 官方多电机模式 |
+| 发一次 SYNC、读所有电机 TPDO 缓存 | `test_sync_read.c` 官方多电机模式；新版 SDK 后台线程负责收包 |
 | EMCY 用 `get_can_ctx` + `can_set_recv_callback` 捕获 | `test_emcy_callback.c:82-99`（driver 的 `len<3` 检查比示例 `len<2` 更安全） |
 | 弧度 `_ex` API、CMake 链接 `pthread`/`rt`、`$ORIGIN` RPATH | SDK 头文件注释与示例编译方式 |
 
@@ -653,12 +657,11 @@ SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接�
 |---|------|------|
 | 1 | EMCY 改用 SDK 专用接口 `miraculous_motor_set_emcy_callback`（按总线注册一次，回调带 node_id），彻底移除 `miraculous_can_set_recv_callback` 及 `can_ctx_`/`can_recv_trampoline` | `miraculous_arm.{hpp,cpp}` |
 | 2 | 主动控制对象在 **CSP 未激活**时由读线程发送 SYNC 维持反馈；被动示教不再使用读线程，而由 `read_passive_feedback()` 对每轮 SYNC 后各节点的新 TPDO2 做 generation 校验 | `miraculous_arm.{hpp,cpp}` |
-| 3 | `enable_csp()` 简化：新 `csp_init` 中 PDO 为出厂预配、timer 模式写各节点 0x1006 并（重)启**共享** master 定时器（幂等，无 SYNC 风暴），因此直接按模式传 `manual = (sync_period_us==0)`，删除"全部 manual + 首电机 sync_start"的旧规避 | `miraculous_arm.cpp` |
+| 3 | 最新 SDK 的非 manual `csp_init` 会增加共享 timer 引用计数；driver 因此统一使用 manual `csp_init`，timer 模式逐轴显式写 0x1006，安全使能完成后仅由首电机 `sync_start` 一次 | `miraculous_arm.cpp` |
 | 4 | CMakeLists：默认 SDK 路径改为 `../../../../miraculous_sdk`，`find_library` 兼容 `build/lib/`（源码构建）与 `lib/`（安装布局），找不到时提示先构建 SDK；仅当链接 .so 时才安装它 | `CMakeLists.txt` |
 
-第 9.2 节修复 2/5 中关于"csp_init 全 manual + 单独 sync_start"“shutdown 注销 CAN
-回调"的描述由本节取代。`enable_emcy_monitor` 参数保留（默认 true），现在只控制
-是否注册专用 EMCY 回调，不再有干扰收包的风险。
+`enable_emcy_monitor` 参数保留（默认 true），现在只控制是否注册专用 EMCY
+回调，不再有干扰收包的风险。
 
 ### 10.3 板上验证要点
 
@@ -675,15 +678,16 @@ SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接�
 板测确认电机不接受每次 start 都重新执行 CSP 初始化。从本次修改起，CSP 配置与
 进程生命周期绑定：
 
-- `MiraculousArm::init()` 在 bootstrap 后执行一次 `set_mode(CSP)` 和
-  `csp_init()`；任一关节配置失败则关闭全部句柄并让节点启动失败。
-- `enable_csp()` 只执行 `full_enable()`、刷新反馈和当前位置 seed。
+- `MiraculousArm::init()` 在 bootstrap 后执行一次 `csp_init(manual=true)`；
+  timer 模式额外逐轴写 0x1006。任一关节配置失败则关闭全部句柄并让节点启动失败。
+- `enable_csp()` 分阶段设置 CSP mode、采集新鲜位置、预装/锁存 seed，再进入
+  Operation Enabled；不使用会自动 fault reset 的 `full_enable()`。
 - `disable()` 只退出 Operation Enabled，不再停止或重建 CSP/SYNC 配置。
-- timer SYNC 从 `init()` 保持到 `shutdown()`；manual SYNC 仍由 active 写周期发送，
-  inactive 主动对象由读线程维持反馈。被动示教走独立的单定时器同步采样路径。
+- timer SYNC 只在安全使能事务成功后启动；manual SYNC 仍由 active 写周期发送，
+  inactive 主动对象由读线程维持反馈。被动示教走独立的同步采样路径。
 
 因此同一进程内连续执行 start → stop → start 时，第二次 start 不包含
-`set_mode()`/`csp_init()`。板上应检查 `csp init` 日志只在 launch 阶段出现一次。
+`csp_init()`。板上应检查 `csp init` 日志只在 launch 阶段出现一次。
 
 ## 12. 待办事项
 

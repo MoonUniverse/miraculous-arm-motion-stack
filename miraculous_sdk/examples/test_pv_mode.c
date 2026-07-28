@@ -34,6 +34,8 @@ int main(int argc, char **argv)
 
     if (miraculous_motor_bootstrap(motor, 3000) < 0) goto cleanup;
 
+    /* 设模式 → 使能 */
+    if (miraculous_motor_set_mode(motor, CIA_MODE_PV) < 0) goto cleanup;
     if (miraculous_motor_full_enable(motor) < 0) goto cleanup;
 
     printf("PV mode — toggling velocity direction every 5s...\n");

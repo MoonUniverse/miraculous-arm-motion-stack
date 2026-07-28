@@ -76,13 +76,9 @@ int main(int argc, char **argv)
     printf("Heartbeat callback registered.\n");
     printf("Waiting for heartbeat events... Press Ctrl+C to exit.\n\n");
 
-    /* --- 轮询总线处理事件 --- */
+    /* --- 等待 Heartbeat 事件 (由 recv 线程处理) --- */
     while (!g_quit) {
-        int n = miraculous_motor_poll(motor, 500);
-        if (n < 0) {
-            fprintf(stderr, "Poll error: %s\n", mrc_strerror(n));
-            break;
-        }
+        usleep(100000);
     }
 
     /* --- 关闭电机 (自动停止心跳) --- */

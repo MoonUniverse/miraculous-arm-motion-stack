@@ -74,9 +74,6 @@ int main(int argc, char **argv)
         /* 一个 SYNC 触发所有电机上报 TPDO */
         miraculous_motor_sync_send(motors[0]);
 
-        /* 一次 poll 收完所有 TPDO 帧 */
-        miraculous_motor_poll(motors[0], 2);
-
         /* 从缓存读取每个电机数据 */
         for (int i = 0; i < opened; i++) {
             int32_t pos, vel;

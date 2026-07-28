@@ -61,7 +61,7 @@ def generate_launch_description():
         DeclareLaunchArgument("record_rate", default_value="50.0"),
         DeclareLaunchArgument("output_file", default_value=""),
         DeclareLaunchArgument("auto_record", default_value="false"),
-        DeclareLaunchArgument("feedback_timeout_ms", default_value="2"),
+        DeclareLaunchArgument("feedback_timeout_ms", default_value="5"),
         DeclareLaunchArgument("max_consecutive_misses", default_value="10"),
         DeclareLaunchArgument("overwrite_existing", default_value="false"),
         Node(

@@ -118,9 +118,6 @@ int main(int argc, char **argv)
         /* 发送 RxPDO1: 控制字=0x000F (使能运行) */
         uint8_t rpdo_data[8] = { 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
         miraculous_motor_rpdo_send(motor, 1, rpdo_data, 8);
-
-        usleep(50000);   /* 50ms */
-        miraculous_motor_poll(motor, 0);
     }
 
 cleanup:

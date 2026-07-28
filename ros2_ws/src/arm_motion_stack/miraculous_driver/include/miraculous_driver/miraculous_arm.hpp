@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -72,13 +73,14 @@ struct FeedbackSample
  * Responsibilities:
  *  - open / bootstrap / enable / disable the configured motors
  *  - pass joint-side radians directly through the SDK _ex APIs
- *  - background thread polling actual position/velocity into a mutex cache
+ *  - wait for SDK receive-thread TPDO callbacks and cache position/velocity
  *  - CSP write of configured target positions with a unified SYNC broadcast
  *  - joint limit clamping and EMCY detection
  *
  * Threading: active-control readers copy the mutex-protected cache. Passive
- * teach acquisition explicitly owns the SDK mutex for one SYNC/poll cycle and
- * does not run the background reader.
+ * teach acquisition explicitly owns the SDK mutex for one SYNC/feedback cycle
+ * and does not run the background reader. CAN receive and TPDO dispatch are
+ * owned by the SDK's per-bus receive thread.
  */
 class MiraculousArm
 {
@@ -186,14 +188,17 @@ private:
   bool open_motors();
   void close_motors(bool force_disable_voltage);
   MiraMotor * first_motor_locked() const;
-  bool acquire_fresh_seed_positions_locked(
+  int sync_and_wait_for_fresh_feedback_locked(
+    int timeout_ms, const char * context,
+    std::chrono::steady_clock::time_point * sync_time = nullptr);
+  int acquire_fresh_seed_positions_locked(
     std::array<double, kArmJoints> & positions, int timeout_ms);
   bool rollback_csp_enable_locked(
     const std::array<CspEnableStage, kArmJoints> & stages);
   bool enter_passive_ready_locked(int timeout_ms);
   bool verify_passive_ready_locked();
   bool disable_voltage_locked(int timeout_ms);
-  bool refresh_feedback_locked(bool send_sync, int poll_timeout_ms);
+  bool refresh_feedback_locked(bool send_sync, int feedback_timeout_ms);
   void start_read_thread();
   void stop_read_thread();
   void read_loop();
@@ -229,8 +234,10 @@ private:
   bool cache_valid_{false};
   bool fault_detected_{false};
 
-  // TPDO freshness tracking for passive, single-SYNC feedback acquisition.
+  // TPDO freshness tracking for all driver-owned single-SYNC acquisitions.
   std::array<std::atomic<uint64_t>, kArmJoints> tpdo2_generation_{};
+  std::mutex feedback_wait_mutex_;
+  std::condition_variable feedback_cv_;
   uint64_t passive_sample_sequence_{0};
 
   // background thread

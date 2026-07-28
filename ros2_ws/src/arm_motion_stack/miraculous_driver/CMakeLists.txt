@@ -117,7 +117,6 @@ if(BUILD_TESTING)
       "-Wl,--wrap=miraculous_motor_sync_stop \
        -Wl,--wrap=miraculous_motor_sync_start \
        -Wl,--wrap=miraculous_motor_sync_send \
-       -Wl,--wrap=miraculous_motor_poll \
        -Wl,--wrap=miraculous_motor_get_state \
        -Wl,--wrap=miraculous_motor_shutdown \
        -Wl,--wrap=miraculous_motor_wait_state \
@@ -125,6 +124,7 @@ if(BUILD_TESTING)
        -Wl,--wrap=miraculous_motor_set_mode \
        -Wl,--wrap=miraculous_motor_switch_on \
        -Wl,--wrap=miraculous_motor_get_position_ex \
+       -Wl,--wrap=miraculous_motor_get_velocity_ex \
        -Wl,--wrap=miraculous_motor_csp_set_target_ex \
        -Wl,--wrap=miraculous_motor_enable \
        -Wl,--wrap=miraculous_motor_quick_stop \

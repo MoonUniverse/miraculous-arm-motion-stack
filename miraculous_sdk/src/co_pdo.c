@@ -13,6 +13,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+
+#define PDO_CONFIG_SDO_TIMEOUT_MS 150
 #include <string.h>
 #include "miraculous_internal.h"
 
@@ -55,19 +57,19 @@ int miraculous_co_pdo_rpdo_config(MiraCoMaster *co, uint8_t node_id,
 
     /* Step 1: 禁用 PDO — bit31=1 */
     uint32_t disabled_cob = cob_id | 0x80000000UL;
-    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x01, &disabled_cob, 150);
+    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x01, &disabled_cob, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) {
         fprintf(stderr, "[pdo] rpdo%d disable failed\n", pdo_num);
         return ret;
     }
 
     /* Step 2: 设置传输类型 */
-    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x02, &trans_type, 150);
+    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x02, &trans_type, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     /* Step 3: 清空映射数 */
     uint8_t zero = 0;
-    ret = CO_SDO_WRITE(co, node_id, map_idx, 0x00, &zero, 150);
+    ret = CO_SDO_WRITE(co, node_id, map_idx, 0x00, &zero, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) {
         fprintf(stderr, "[pdo] rpdo%d clear mapping count failed\n", pdo_num);
     }
@@ -75,7 +77,7 @@ int miraculous_co_pdo_rpdo_config(MiraCoMaster *co, uint8_t node_id,
     /* Step 4: 设置映射条目 */
     for (uint8_t i = 0; i < mapped_count; i++) {
         ret = CO_SDO_WRITE(co, node_id, map_idx, 0x01 + i,
-                          &mappings[i], 150);
+                          &mappings[i], PDO_CONFIG_SDO_TIMEOUT_MS);
         if (ret < 0) {
             fprintf(stderr, "[pdo] rpdo%d map entry %d failed\n",
                     pdo_num, i + 1);
@@ -84,15 +86,15 @@ int miraculous_co_pdo_rpdo_config(MiraCoMaster *co, uint8_t node_id,
     }
 
     /* Step 5: 设置映射数 */
-    ret = CO_SDO_WRITE(co, node_id, map_idx, 0x00, &mapped_count, 150);
+    ret = CO_SDO_WRITE(co, node_id, map_idx, 0x00, &mapped_count, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     /* Step 6: 设置事件定时器 (sub5, 单位 ms, 0=禁用) */
-    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x05, &event_timer_ms, 150);
+    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x05, &event_timer_ms, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     /* Step 7: 启用 PDO — 写纯 COB-ID (bit31=0) */
-    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x01, &cob_id, 150);
+    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x01, &cob_id, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     printf("[pdo] rpdo%d configured: cob=0x%03X type=%d timer=%dms mappings=%d\n",
@@ -120,38 +122,38 @@ int miraculous_co_pdo_tpdo_config(MiraCoMaster *co, uint8_t node_id,
 
     /* Step 1: 禁用 — bit31=1 */
     uint32_t disabled_cob = cob_id | 0x80000000UL;
-    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x01, &disabled_cob, 150);
+    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x01, &disabled_cob, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) { fprintf(stderr, "[pdo] tpdo%d disable failed\n", pdo_num); return ret; }
 
     /* Step 2: 设置传输类型 */
-    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x02, &trans_type, 150);
+    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x02, &trans_type, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     /* Step 3: 清空映射数 */
     uint8_t zero = 0;
-    ret = CO_SDO_WRITE(co, node_id, map_idx, 0x00, &zero, 150);
+    ret = CO_SDO_WRITE(co, node_id, map_idx, 0x00, &zero, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     /* Step 4: 设置映射条目 */
     for (uint8_t i = 0; i < mapped_count; i++) {
-        ret = CO_SDO_WRITE(co, node_id, map_idx, 0x01 + i, &mappings[i], 150);
+        ret = CO_SDO_WRITE(co, node_id, map_idx, 0x01 + i, &mappings[i], PDO_CONFIG_SDO_TIMEOUT_MS);
         if (ret < 0) { fprintf(stderr, "[pdo] tpdo%d map entry %d failed\n", pdo_num, i + 1); return ret; }
     }
 
     /* Step 5: 设置映射数 */
-    ret = CO_SDO_WRITE(co, node_id, map_idx, 0x00, &mapped_count, 150);
+    ret = CO_SDO_WRITE(co, node_id, map_idx, 0x00, &mapped_count, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     /* Step 6: 设置禁止时间 (sub3, 单位 100μs, 0=禁用) */
-    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x03, &inhibit_time, 150);
+    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x03, &inhibit_time, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     /* Step 7: 设置事件定时器 (sub5, 单位 ms, 0=禁用) */
-    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x05, &event_timer_ms, 150);
+    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x05, &event_timer_ms, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     /* Step 8: 启用 — 写纯 COB-ID */
-    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x01, &cob_id, 150);
+    ret = CO_SDO_WRITE(co, node_id, comm_idx, 0x01, &cob_id, PDO_CONFIG_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     printf("[pdo] tpdo%d configured: cob=0x%03X type=%d inhibit=%d timer=%dms mappings=%d\n",
@@ -172,7 +174,7 @@ int miraculous_co_pdo_send(MiraCoMaster *co, uint8_t pdo_num,
 
 /* --- TPDO 回调机制 --- */
 
-#define MAX_TPDO_CBS  16
+#define MAX_TPDO_CBS  32
 
 typedef struct {
     uint8_t          node_id;

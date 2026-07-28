@@ -17,19 +17,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <errno.h>
+#include <linux/can.h>
 #include <net/if.h>
 
 #include "miraculous_internal.h"
 
 /*----------------------------------------------------------------------------
- * 子模块前向声明
+ * 子模块前向声明 — 均已移至 miraculous_internal.h
  *----------------------------------------------------------------------------*/
-
-typedef struct HbCtx_t   HbCtx_t;
-typedef struct PdoCtx_t  PdoCtx_t;
-typedef struct SyncCtx_t SyncCtx_t;
-typedef struct EmcyCtx_t EmcyCtx_t;
 
 /* 子模块 create/destroy/accessor */
 HbCtx_t*   co_heartbeat_create(void);
@@ -55,20 +55,9 @@ void       co_emcy_handle(EmcyCtx_t *ctx, uint32_t can_id,
                            const uint8_t *data, uint8_t len);
 
 /*----------------------------------------------------------------------------
- * MiraCoMaster 结构体
+ * MiraCoMaster 结构体 — 定义已移至 miraculous_internal.h
+ * 此处仅保留 struct tag，用于 static 函数前向声明
  *----------------------------------------------------------------------------*/
-
-struct MiraCoMaster {
-    MiraCanCtx  *can;
-    HbCtx_t     *hb;
-    PdoCtx_t    *pdo;
-    SyncCtx_t   *sync;
-    EmcyCtx_t   *emcy;
-
-    int          epoll_fd;   /* epoll 集成: 同步定时器 fd */
-    bool         own_can;    /* 是否拥有 CAN 生命周期 */
-    int          refcount;   /* 引用计数, 共享同一总线的电机数 */
-};
 
 /*----------------------------------------------------------------------------
  * 内部访问器 (供各子模块使用)
@@ -122,18 +111,19 @@ static void co_global_recv_callback(uint32_t can_id, const uint8_t *data,
             co_emcy_handle(co->emcy, can_id, data, len);
         }
 
-    } else if (base_id >= CO_COB_TPDO1 && base_id <= CO_COB_TPDO4 + 127 * 4) {
-        /* TPDO 区域: 0x180-0x57F */
+    } else if (base_id >= CO_COB_TPDO1 && base_id <= CO_COB_TPDO4) {
+        /* TPDO 区域: 0x180-0x4FF */
         co_pdo_handle_tpdo(co->pdo, can_id, data, len);
     }
-    /* 其他帧（如 SDO 响应）由调用层的 recv_timeout() 直接处理 */
+    /* 注意: SDO 响应不由回调分发, 接收线程或 recv_timeout 直接处理 */
 }
 
 /*----------------------------------------------------------------------------
  * 生命周期
  *----------------------------------------------------------------------------*/
 
-MiraCoMaster* miraculous_co_init(MiraCanCtx *can_ctx, CiaBaudrate_t baudrate)
+MiraCoMaster* miraculous_co_init(MiraCanCtx *can_ctx, CiaBaudrate_t baudrate,
+                                  bool start_recv_thread)
 {
     if (!can_ctx) return NULL;
 
@@ -163,7 +153,7 @@ MiraCoMaster* miraculous_co_init(MiraCanCtx *can_ctx, CiaBaudrate_t baudrate)
         return NULL;
     }
 
-    co->own_can = false;    /* 用户提供的 CAN, 不由 master 清理 */
+    co->own_can   = true;  /* co_init 只在内部调用, 始终拥有 CAN */
 
     /* 子模块关联 CAN */
     co_heartbeat_set_can(co->hb, can_ctx);
@@ -172,10 +162,29 @@ MiraCoMaster* miraculous_co_init(MiraCanCtx *can_ctx, CiaBaudrate_t baudrate)
     /* 注册全局接收回调 (分发 Heartbeat/EMCY/TPDO) */
     miraculous_can_set_recv_callback(can_ctx, co_global_recv_callback, co);
 
-    co->own_can   = true;  /* co_init 只在内部调用, 始终拥有 CAN */
+    /* 初始化 SDO 队列锁 */
+    pthread_mutex_init(&co->sdo_queue_lock, NULL);
+    memset(co->sdo_wait_queue, 0, sizeof(co->sdo_wait_queue));
+
+    /* 初始化每节点 SDO 锁 */
+    for (int i = 0; i < 128; i++) {
+        pthread_mutex_init(&co->sdo_node_lock[i], NULL);
+        pthread_cond_init(&co->sdo_node_cond[i], NULL);
+        co->sdo_node_busy[i] = false;
+    }
     co->refcount = 1;
+    co->recv_running = false;
+    co->recv_stop = false;
 
     printf("[co_master] initialized (baudrate=%u)\n", baudrate);
+
+    if (start_recv_thread) {
+        int r = miraculous_co_recv_start(co);
+        if (r < 0) {
+            printf("[co_master] recv thread start failed\n");
+        }
+    }
+
     return co;
 }
 
@@ -183,16 +192,28 @@ void miraculous_co_free(MiraCoMaster *co)
 {
     if (!co) return;
 
-    co->refcount--;
-    if (co->refcount > 0) {
+    if (__atomic_sub_fetch(&co->refcount, 1, __ATOMIC_SEQ_CST) > 0) {
         /* 还有电机引用此 master, 不释放 */
         return;
+    }
+
+    /* 停止接收线程 */
+    if (co->recv_running) {
+        miraculous_co_recv_stop(co);
     }
 
     if (co->sync)  co_sync_destroy(co->sync);
     if (co->hb)    co_heartbeat_destroy(co->hb);
     if (co->pdo)   co_pdo_destroy(co->pdo);
     if (co->emcy)  co_emcy_destroy(co->emcy);
+
+    /* 销毁每节点 SDO 锁 */
+    for (int i = 0; i < 128; i++) {
+        pthread_mutex_destroy(&co->sdo_node_lock[i]);
+        pthread_cond_destroy(&co->sdo_node_cond[i]);
+    }
+
+    pthread_mutex_destroy(&co->sdo_queue_lock);
 
     if (co->own_can && co->can) {
         miraculous_can_close(co->can);
@@ -212,44 +233,17 @@ int miraculous_co_poll(MiraCoMaster *co, int timeout_ms)
 
     /* 先做心跳超时检测 */
     co_heartbeat_check_timeouts(co->hb);
+    miraculous_co_sdo_timeout_check(co);
 
-    /* epoll 等待 CAN 帧 + SYNC timer */
-    int can_fd   = miraculous_can_fd(co->can);
-    int sync_fd  = miraculous_co_sync_fd(co);
+    /* CAN 帧轮询 — 复用底层的 epoll (不自建 epoll) */
+    int handled = miraculous_can_poll(co->can, timeout_ms);
+    if (handled < 0) return handled;
 
-    struct epoll_event events[4];
-    int epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0) {
-        /* 回退到只有 CAN 的轮询 */
-        return miraculous_can_poll(co->can, timeout_ms);
-    }
-
-    struct epoll_event ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.events = EPOLLIN;
-    ev.data.fd = can_fd;
-    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, can_fd, &ev);
-
+    /* SYNC 定时器到期检查 */
+    int sync_fd = miraculous_co_sync_fd(co);
     if (sync_fd >= 0) {
-        ev.data.fd = sync_fd;
-        epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sync_fd, &ev);
-    }
-
-    int nfds = epoll_wait(epoll_fd, events, 4, timeout_ms);
-    close(epoll_fd);
-
-    if (nfds < 0) {
-        return MRC_ERROR_CAN_RECV;
-    }
-
-    int handled = 0;
-    for (int i = 0; i < nfds; i++) {
-        if (events[i].data.fd == can_fd) {
-            /* CAN 帧到达 — 调 can poll 处理（会触发回调） */
-            int r = miraculous_can_poll(co->can, 0);
-            if (r > 0) handled += r;
-        } else if (events[i].data.fd == sync_fd && sync_fd >= 0) {
-            /* SYNC 定时器到期 */
+        struct epoll_event ev;
+        if (epoll_wait(sync_fd, &ev, 1, 0) > 0) {
             co_sync_handle_tick(co->sync);
             handled++;
         }
@@ -264,12 +258,13 @@ int miraculous_co_poll(MiraCoMaster *co, int timeout_ms)
 
 void miraculous_co_ref_inc(MiraCoMaster *co)
 {
-    if (co) co->refcount++;
+    if (co) __atomic_add_fetch(&co->refcount, 1, __ATOMIC_SEQ_CST);
 }
 
 int miraculous_co_ref_count(MiraCoMaster *co)
 {
-    return co ? co->refcount : 0;
+    if (!co) return 0;
+    return __atomic_load_n(&co->refcount, __ATOMIC_SEQ_CST);
 }
 
 /*----------------------------------------------------------------------------
@@ -315,4 +310,157 @@ int miraculous_co_bootstrap(MiraCoMaster *co, uint8_t node_id,
 
     printf("[bootstrap] node %d started.\n", node_id);
     return MRC_SUCCESS;
+}
+
+/*----------------------------------------------------------------------------
+ * 接收线程 — 专用 epoll 循环, 持续读取 CAN 帧并分发
+ *----------------------------------------------------------------------------*/
+static void* co_recv_thread_func(void *arg)
+{
+    MiraCoMaster *co = (MiraCoMaster *)arg;
+    if (!co) return NULL;
+
+    int can_fd = miraculous_can_fd(co->can);
+    int hb_check_counter = 0;
+
+    /* 创建本地 epoll, 监听 can_fd + sync timerfd */
+    int local_ep = epoll_create1(0);
+    if (local_ep < 0) return NULL;
+
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.events = EPOLLIN;
+    ev.data.fd = can_fd;
+    if (epoll_ctl(local_ep, EPOLL_CTL_ADD, can_fd, &ev) < 0) {
+        fprintf(stderr, "[recv_thread] epoll_ctl ADD can_fd failed: %s\n",
+                strerror(errno));
+        close(local_ep);
+        return NULL;
+    }
+
+    /* 标记 fd 身份, 用于 epoll 事件区分 */
+    ev.data.fd = can_fd;        /* data.fd == can_fd → CAN 帧 */
+    epoll_ctl(local_ep, EPOLL_CTL_MOD, can_fd, &ev);
+
+    co->recv_running = true;
+
+    while (!co->recv_stop) {
+        struct epoll_event events[2];
+        int nfds = epoll_wait(local_ep, events, 2, 100);
+        if (nfds < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        /* 定期心跳超时检测 (~100ms 周期) */
+        hb_check_counter++;
+        if (hb_check_counter >= 10) {
+            hb_check_counter = 0;
+            co_heartbeat_check_timeouts(co->hb);
+            miraculous_co_sdo_timeout_check(co);
+        }
+
+        if (nfds == 0) continue;
+
+        for (int i = 0; i < nfds; i++) {
+            if (events[i].data.fd == can_fd) {
+                /* CAN 帧到达 */
+                struct can_frame frame;
+                ssize_t n = read(can_fd, &frame, CAN_MTU);
+                if (n < 0) {
+                    if (errno == EAGAIN || errno == EINTR) continue;
+                    break;
+                }
+
+                uint32_t recv_id = frame.can_id & CAN_SFF_MASK;
+                uint8_t dlc = frame.can_dlc;
+                if (dlc > 8) dlc = 8;
+
+                /* SDO 响应 → 队列匹配 */
+                if (recv_id >= CO_COB_SDO_TX && recv_id <= CO_COB_SDO_TX + 127) {
+                    if (miraculous_co_sdo_wait_dispatch(co, recv_id,
+                                                         frame.data, dlc) == 0)
+                        continue;
+                }
+
+                /* 非 SDO → 全局回调 (心跳/EMCY/TPDO) */
+                co_global_recv_callback(recv_id, frame.data, dlc, co);
+
+            } else {
+                /* 非 can_fd: 检查是否是 sync timerfd */
+                SyncCtx_t *sync = miraculous_co_get_sync(co);
+                if (sync && sync->timer_fd == events[i].data.fd
+                    && sync->running) {
+                    co_sync_handle_tick(sync);
+                } else {
+                    /* 未知 fd, 排空以避免重复唤醒 */
+                    uint64_t exp;
+                    ssize_t rd = read(events[i].data.fd, &exp, sizeof(exp));
+                    (void)rd;
+                }
+            }
+        }
+
+        /* 动态检查 sync timerfd 是否已启动/变更 */
+        SyncCtx_t *sync = miraculous_co_get_sync(co);
+        if (sync && sync->timer_fd >= 0 && sync->running) {
+            /* 检查是否已在 epoll 中 (通过尝试 MOD, 如果失败则 ADD) */
+            ev.events = EPOLLIN;
+            ev.data.fd = sync->timer_fd;
+            epoll_ctl(local_ep, EPOLL_CTL_MOD, sync->timer_fd, &ev);
+            /* MOD 失败说明不在 epoll 中, 尝试 ADD */
+            if (errno == ENOENT) {
+                epoll_ctl(local_ep, EPOLL_CTL_ADD, sync->timer_fd, &ev);
+            }
+        }
+    }
+
+    co->recv_running = false;
+    close(local_ep);
+    return NULL;
+}
+
+
+int miraculous_co_recv_start(MiraCoMaster *co)
+{
+    if (!co) return MRC_ERROR_INVALID_PARAM;
+    if (co->recv_running) return MRC_SUCCESS;
+
+    co->recv_stop = false;
+
+    /* 尝试创建线程, 优先实时调度 (SCHED_FIFO), 失败则回退到普通调度 */
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    struct sched_param sp = { .sched_priority = 30 };
+    pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
+    pthread_attr_setschedparam(&attr, &sp);
+    pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
+    int ret = pthread_create(&co->recv_thread, &attr,
+                              co_recv_thread_func, co);
+    if (ret == EPERM) {
+        pthread_attr_destroy(&attr);
+        pthread_attr_init(&attr);
+        ret = pthread_create(&co->recv_thread, &attr,
+                              co_recv_thread_func, co);
+    }
+    pthread_attr_destroy(&attr);
+    if (ret != 0) return MRC_ERROR_UNKNOWN;
+
+    /* 等待线程完成初始化 (最大 1s) */
+    for (int i = 0; i < 100 && !co->recv_running; i++)
+        usleep(10000);
+    if (!co->recv_running) {
+        co->recv_stop = true;
+        pthread_join(co->recv_thread, NULL);
+        return MRC_ERROR_UNKNOWN;
+    }
+    return MRC_SUCCESS;
+}
+
+void miraculous_co_recv_stop(MiraCoMaster *co)
+{
+    if (!co || !co->recv_running) return;
+    co->recv_stop = true;
+    pthread_join(co->recv_thread, NULL);
+    co->recv_stop = false;
 }

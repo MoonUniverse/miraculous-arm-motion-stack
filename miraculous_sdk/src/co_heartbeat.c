@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <time.h>
 #include "miraculous_internal.h"
 
@@ -27,7 +28,7 @@ typedef struct {
     int                  timeout_ms;
 } HbNode_t;
 
-typedef struct {
+typedef struct HbCtx_t {
     MiraCanCtx  *can;
     HbNode_t     nodes[MAX_HEARTBEAT_NODES];
     int          count;
@@ -169,8 +170,7 @@ int miraculous_co_wait_state(MiraCoMaster *co, uint8_t node_id,
 
         int remaining = (int)(deadline_ms - elapsed);
         if (remaining > 100) remaining = 100;
-        int ret = miraculous_co_poll(co, remaining);
-        if (ret < 0) return ret;
+        usleep(remaining * 1000);  /* 接收线程会处理帧, 只需睡眠等心跳状态更新 */
     }
 
     hb->waiting_node = 0;

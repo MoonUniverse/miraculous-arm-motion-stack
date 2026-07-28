@@ -46,6 +46,8 @@ int main(int argc, char **argv)
     }
 
     /* --- 5. 使能电机 (Shutdown → Switch On → Enable Operation) --- */
+    /* 设模式 → 使能 */
+    if (miraculous_motor_set_mode(motor, CIA_MODE_PP) < 0) goto cleanup;
     ret = miraculous_motor_full_enable(motor);
     if (ret < 0) {
         fprintf(stderr, "Enable failed: %s\n", mrc_strerror(ret));

@@ -22,8 +22,10 @@
 #include <linux/can/raw.h>
 #include <time.h>
 #include <limits.h>
+#include <pthread.h>
 
 #include "miraculous_internal.h"
+
 
 /*----------------------------------------------------------------------------
  * 内部数据结构
@@ -41,6 +43,7 @@ typedef struct {
 struct MiraCanCtx {
     int              sock_fd;                        /* SocketCAN fd */
     int              epoll_fd;                       /* epoll fd */
+    pthread_mutex_t  lock;                           /* 收发互斥锁 */
     char             ifname[IFNAMSIZ];               /* 接口名 */
     bool             running;
 
@@ -164,15 +167,6 @@ MiraCanCtx* miraculous_can_open(const char *ifname, CiaBaudrate_t baudrate)
         return NULL;
     }
 
-    /* --- 启用 CAN FD 支持 --- */
-    int enable = 1;
-    if (setsockopt(ctx->sock_fd, SOL_CAN_RAW, CAN_RAW_FD_FRAMES,
-                   &enable, sizeof(enable)) < 0) {
-        /* CAN FD 不支持也不致命，仅打印警告 */
-        fprintf(stderr, "[can_socket] CAN FD not supported on %s, "
-                "falling back to classic CAN\n", ifname);
-    }
-
     /* --- 关闭回环: 不接收自己发送的帧 --- */
     int no_loopback = 0;
     setsockopt(ctx->sock_fd, SOL_CAN_RAW, CAN_RAW_RECV_OWN_MSGS,
@@ -201,6 +195,21 @@ MiraCanCtx* miraculous_can_open(const char *ifname, CiaBaudrate_t baudrate)
         return NULL;
     }
 
+    /* --- 内核级 CAN ID 过滤 --- */
+    /* 掩码 0x780: 保留 bit[10:7] (高 4 位), 匹配 128 个节点 ID (1~127) */
+    struct can_filter filters[] = {
+        { 0x000, 0x780 },  /* NMT */
+        { 0x080, 0x780 },  /* EMCY 0x080-0x0FF */
+        { 0x180, 0x780 },  /* TPDO1 0x180-0x1FF */
+        { 0x280, 0x780 },  /* TPDO2 0x280-0x2FF */
+        { 0x380, 0x780 },  /* TPDO3 0x380-0x3FF */
+        { 0x480, 0x780 },  /* TPDO4 0x480-0x4FF */
+        { 0x580, 0x780 },  /* SDO 响应 0x580-0x5FF */
+        { 0x700, 0x780 },  /* Heartbeat 0x700-0x77F */
+    };
+    setsockopt(ctx->sock_fd, SOL_CAN_RAW, CAN_RAW_FILTER,
+               filters, sizeof(filters));
+
     /* --- 创建 epoll --- */
     ctx->epoll_fd = epoll_create1(0);
     if (ctx->epoll_fd < 0) {
@@ -223,6 +232,7 @@ MiraCanCtx* miraculous_can_open(const char *ifname, CiaBaudrate_t baudrate)
     }
 
     ctx->running = true;
+    pthread_mutex_init(&ctx->lock, NULL);
     printf("[can_socket] opened %s (fd=%d)\n", ifname, ctx->sock_fd);
     return ctx;
 }
@@ -234,7 +244,7 @@ void miraculous_can_close(MiraCanCtx *ctx)
 
     if (ctx->epoll_fd >= 0) close(ctx->epoll_fd);
     if (ctx->sock_fd >= 0) close(ctx->sock_fd);
-
+    pthread_mutex_destroy(&ctx->lock);
     printf("[can_socket] closed %s\n", ctx->ifname);
     free(ctx);
 }
@@ -242,6 +252,11 @@ void miraculous_can_close(MiraCanCtx *ctx)
 int miraculous_can_fd(MiraCanCtx *ctx)
 {
     return ctx ? ctx->sock_fd : -1;
+}
+
+int miraculous_can_get_epoll_fd(MiraCanCtx *ctx)
+{
+    return ctx ? ctx->epoll_fd : -1;
 }
 
 /*----------------------------------------------------------------------------
@@ -254,13 +269,15 @@ int miraculous_can_send(MiraCanCtx *ctx, uint32_t can_id,
     if (!ctx || !data || len > 8) return MRC_ERROR_INVALID_PARAM;
     if (!ctx->running) return MRC_ERROR_NOT_INIT;
 
+    
     struct can_frame frame;
     memset(&frame, 0, sizeof(frame));
     frame.can_id  = can_id & CAN_SFF_MASK;  /* 11-bit 标准帧 */
     frame.can_dlc = len;
     if (len > 0) memcpy(frame.data, data, len);
-
+    pthread_mutex_lock(&ctx->lock);
     int n = write(ctx->sock_fd, &frame, sizeof(frame));
+    pthread_mutex_unlock(&ctx->lock);
     if (n < 0) {
         if (errno == ENOBUFS || errno == EAGAIN) {
             return MRC_ERROR_CAN_TX_FULL;
@@ -279,36 +296,22 @@ int miraculous_can_send_frame(MiraCanCtx *ctx, const MiraCanFrame_t *frame)
     if (!ctx || !frame) return MRC_ERROR_INVALID_PARAM;
     if (!ctx->running) return MRC_ERROR_NOT_INIT;
 
-    struct canfd_frame fd_frame;
-    memset(&fd_frame, 0, sizeof(fd_frame));
+    uint8_t len = frame->can_dlc;
+    if (len > 8) len = 8;
 
-    fd_frame.can_id = frame->can_id & CAN_SFF_MASK;
-    fd_frame.len    = frame->can_dlc;
-    fd_frame.flags  = 0;
+    struct can_frame cf;
+    memset(&cf, 0, sizeof(cf));
+    cf.can_id  = frame->can_id & CAN_SFF_MASK;
+    cf.can_dlc = len;
+    memcpy(cf.data, frame->data, len);
 
-    if (frame->can_dlc > 8) {
-        /* CAN FD 帧 */
-        fd_frame.flags |= CANFD_BRS; /* 启用比特率切换 */
-        memcpy(fd_frame.data, frame->data, frame->can_dlc);
-        int n = write(ctx->sock_fd, &fd_frame, sizeof(fd_frame));
-        if (n < 0) {
-            if (errno == ENOBUFS || errno == EAGAIN)
-                return MRC_ERROR_CAN_TX_FULL;
-            return MRC_ERROR_CAN_SEND;
-        }
-    } else {
-        /* 回退到传统 CAN 帧 */
-        struct can_frame cf;
-        memset(&cf, 0, sizeof(cf));
-        cf.can_id  = frame->can_id & CAN_SFF_MASK;
-        cf.can_dlc = frame->can_dlc;
-        memcpy(cf.data, frame->data, frame->can_dlc);
-        int n = write(ctx->sock_fd, &cf, sizeof(cf));
-        if (n < 0) {
-            if (errno == ENOBUFS || errno == EAGAIN)
-                return MRC_ERROR_CAN_TX_FULL;
-            return MRC_ERROR_CAN_SEND;
-        }
+    pthread_mutex_lock(&ctx->lock);
+    int n = write(ctx->sock_fd, &cf, sizeof(cf));
+    pthread_mutex_unlock(&ctx->lock);
+    if (n < 0) {
+        if (errno == ENOBUFS || errno == EAGAIN)
+            return MRC_ERROR_CAN_TX_FULL;
+        return MRC_ERROR_CAN_SEND;
     }
     return MRC_SUCCESS;
 }
@@ -351,19 +354,23 @@ int miraculous_can_recv_timeout(MiraCanCtx *ctx, uint32_t can_id,
         int64_t elapsed = (now.tv_sec - start.tv_sec) * 1000LL
                         + (now.tv_nsec - start.tv_nsec) / 1000000LL;
         int64_t remaining = deadline_ms - elapsed;
-        if (remaining <= 0) return MRC_ERROR_TIMEOUT;
+        if (remaining <= 0) {
+            return MRC_ERROR_TIMEOUT;
+        }
         if (remaining > INT_MAX) remaining = INT_MAX;
 
-        /* epoll 等待 */
+        /* epoll 等待 (不持锁, epoll_wait 不会与 send 冲突) */
         struct epoll_event events[1];
         int nfds = epoll_wait(ctx->epoll_fd, events, 1, (int)remaining);
         if (nfds < 0) {
             if (errno == EINTR) continue;
             return MRC_ERROR_CAN_RECV;
         }
-        if (nfds == 0) return MRC_ERROR_TIMEOUT;
+        if (nfds == 0) {
+            return MRC_ERROR_TIMEOUT;
+        }
 
-        /* 读取数据 */
+        /* 读取数据 (不持锁, read 与 write 不冲突) */
         struct can_frame frame;
         ssize_t n = read(ctx->sock_fd, &frame, CAN_MTU);
         if (n < 0) {
@@ -377,6 +384,7 @@ int miraculous_can_recv_timeout(MiraCanCtx *ctx, uint32_t can_id,
 
         if (recv_id != can_id) {
             /* 不匹配的帧分发给全局回调（更新 TPDO 缓存等） */
+            /* 注意: 回调内可能调 can_send, 所以绝不能在 ctx->lock 内调 */
             if (ctx->global_callback) {
                 ctx->global_callback(recv_id, frame.data, dlc,
                                      ctx->global_user_data);
@@ -385,7 +393,6 @@ int miraculous_can_recv_timeout(MiraCanCtx *ctx, uint32_t can_id,
         }
 
         /* 匹配成功 */
-        if (dlc > 8) dlc = 8;
         if (dlc > *len_out) dlc = *len_out;
         memcpy(data_out, frame.data, dlc);
         *len_out = dlc;
@@ -407,6 +414,7 @@ int miraculous_can_poll(MiraCanCtx *ctx, int timeout_ms)
 {
     if (!ctx || !ctx->running) return MRC_ERROR_NOT_INIT;
 
+    /* Phase 1: epoll_wait + 批量读取 (不持锁, 仅 read 不与 send 冲突) */
     struct epoll_event events[MAX_EPOLL_EVENTS];
     int nfds = epoll_wait(ctx->epoll_fd, events, MAX_EPOLL_EVENTS, timeout_ms);
     if (nfds < 0) {
@@ -414,39 +422,40 @@ int miraculous_can_poll(MiraCanCtx *ctx, int timeout_ms)
         return MRC_ERROR_CAN_RECV;
     }
 
-    int handled = 0;
-    for (int i = 0; i < nfds; i++) {
-        if (events[i].events & EPOLLIN) {
-            /* 批量读取直到 EAGAIN */
-            while (1) {
-                struct canfd_frame fd_frame;
-                ssize_t n = read(ctx->sock_fd, &fd_frame, sizeof(fd_frame));
-                if (n < 0) {
-                    if (errno == EAGAIN || errno == EINTR) break;
-                    return MRC_ERROR_CAN_RECV;
-                }
-                handled++;
+    /* 收集帧到栈缓冲区, 避免在锁内做任何可能阻塞的操作 */
+    struct { uint32_t id; uint8_t dlc; uint8_t data[8]; } batch[64];
+    int count = 0;
 
-                uint32_t recv_id = fd_frame.can_id & CAN_SFF_MASK;
-                uint8_t  dlc     = fd_frame.len;
+    for (int i = 0; i < nfds && count < 64; i++) {
+        if (!(events[i].events & EPOLLIN)) continue;
+        while (count < 64) {
+            struct can_frame frame;
+            ssize_t n = read(ctx->sock_fd, &frame, CAN_MTU);
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EINTR) break;
+                return MRC_ERROR_CAN_RECV;
+            }
+            batch[count].id = frame.can_id & CAN_SFF_MASK;
+            batch[count].dlc = frame.can_dlc > 8 ? 8 : frame.can_dlc;
+            memcpy(batch[count].data, frame.data, batch[count].dlc);
+            count++;
+        }
+    }
 
-                /* 分发回调 */
-                if (ctx->global_callback) {
-                    ctx->global_callback(recv_id, fd_frame.data,
-                                        dlc, ctx->global_user_data);
-                }
-
-                /* 分发按 ID 注册的回调 */
-                for (int j = 0; j < ctx->callback_count; j++) {
-                    if (ctx->callbacks[j].can_id == recv_id
-                        && ctx->callbacks[j].callback) {
-                        ctx->callbacks[j].callback(recv_id, fd_frame.data,
-                                                   dlc,
-                                                   ctx->callbacks[j].user_data);
-                    }
-                }
+    /* Phase 2: 分发回调 (不持锁, 回调内可安全调 can_send) */
+    for (int i = 0; i < count; i++) {
+        if (ctx->global_callback) {
+            ctx->global_callback(batch[i].id, batch[i].data,
+                                batch[i].dlc, ctx->global_user_data);
+        }
+        for (int j = 0; j < ctx->callback_count; j++) {
+            if (ctx->callbacks[j].can_id == batch[i].id
+                && ctx->callbacks[j].callback) {
+                ctx->callbacks[j].callback(batch[i].id, batch[i].data,
+                                           batch[i].dlc,
+                                           ctx->callbacks[j].user_data);
             }
         }
     }
-    return handled;
+    return count;
 }

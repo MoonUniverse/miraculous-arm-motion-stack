@@ -9,6 +9,14 @@
 
 #include "miraculous_sdk.h"
 
+#include <pthread.h>
+#include <time.h>
+#define MOTION_SDO_TIMEOUT_MS  500
+
+/* SDO 超时配置 (ms) */
+#define SET_MODE_SDO_TIMEOUT_MS  500
+#define SHUTDOWN_SDO_TIMEOUT_MS  500
+
 /*----------------------------------------------------------------------------
  * 位置单位换算 — 内部使用
  * 分辨率 = 2^BW counts/rev, BW 存储在 motor->encoder_bw 中
@@ -57,6 +65,76 @@
 #define CO_SDO_TOGGLE_MASK     0x10
 
 /*----------------------------------------------------------------------------
+ * SDO 等待队列 — 用于接收线程模式
+ *----------------------------------------------------------------------------*/
+#define SDO_WAIT_QUEUE_MAX  16
+
+typedef struct {
+    uint32_t     resp_can_id;     /* SDO 响应 CAN ID (0x580 + node_id) */
+    uint16_t     index;           /* OD index */
+    uint8_t      subindex;        /* OD subindex */
+    uint8_t     *data_out;        /* 响应数据缓冲区 */
+    uint8_t     *len_out;         /* 响应数据长度 (输入=最大, 输出=实际) */
+    bool         in_use;
+    bool         done;
+    int          result;          /* SDO 操作结果码 */
+    pthread_cond_t  cond;         /* 等待条件变量 */
+} SdoWaitEntry_t;
+
+/* 子模块前向声明 (用于 MiraCoMaster 指针成员) */
+typedef struct HbCtx_t   HbCtx_t;
+typedef struct PdoCtx_t  PdoCtx_t;
+typedef struct EmcyCtx_t EmcyCtx_t;
+
+/* SyncCtx_t 完整定义 — co_master.c 接收线程需要访问 timer_fd/running */
+typedef struct SyncCtx_t {
+    MiraCanCtx     *can;
+    int             timer_fd;
+    bool            running;
+    uint32_t        period_us;      /* 当前周期 (0 = 未配置) */
+    int             refcount;       /* 引用计数, 多少电机要求 SYNC */
+    pthread_mutex_t lock;           /* 保护 refcount/period_us/running */
+} SyncCtx_t;
+
+/*----------------------------------------------------------------------------
+ * MiraCoMaster 结构体
+ *----------------------------------------------------------------------------*/
+struct MiraCoMaster {
+    MiraCanCtx  *can;
+    HbCtx_t     *hb;
+    PdoCtx_t    *pdo;
+    SyncCtx_t   *sync;
+    EmcyCtx_t   *emcy;
+
+    bool         own_can;    /* 是否拥有 CAN 生命周期 */
+    int          refcount;   /* 引用计数, 共享同一总线的电机数 */
+
+    /* SDO 等待队列 (接收线程模式) */
+    SdoWaitEntry_t  sdo_wait_queue[SDO_WAIT_QUEUE_MAX];
+    pthread_mutex_t sdo_queue_lock;
+
+    /* 电机索引表 (节点 ID → MiraMotor*, 用于异步 SDO 分发) */
+    struct MiraMotor *motor_by_node[128];
+
+    /* 每节点 SDO 锁 (同步模式, 不同节点可并行 SDO) */
+    pthread_mutex_t sdo_node_lock[128];
+    pthread_cond_t  sdo_node_cond[128];
+    bool            sdo_node_busy[128];
+    uint8_t         sdo_node_rx_buf[128][8];
+    uint8_t         sdo_node_rx_len[128];
+    uint16_t        sdo_node_pending_idx[128];   /* 当前 SDO 请求的 OD index */
+    uint8_t         sdo_node_pending_sub[128];    /* 当前 SDO 请求的 OD subindex */
+
+    /* epoll fd (复用, 避免每次 poll 创建销毁) */
+    int             epoll_fd;
+
+    /* 接收线程 */
+    pthread_t       recv_thread;
+    volatile bool   recv_running;  /* 线程已初始化并运行 */
+    volatile bool   recv_stop;     /* 请求线程停止 */
+};
+
+/*----------------------------------------------------------------------------
  * 厂商特定 OD 子索引 — 内部使用
  *----------------------------------------------------------------------------*/
 #define CIA402_OD_SERVO_PARAMETERS_NODEID   0x01U
@@ -64,6 +142,40 @@
 
 /* CiA 301 标准 */
 #define CIA402_OD_COMM_CYCLE_PERIOD  0x1006U   /* Communication Cycle Period */
+
+/* 内部 CAN 帧结构 (对应 MiraCanFrame_t, 仅 SDK 内部使用) */
+#define CAN_DATA_MAX  64
+
+typedef struct {
+    uint32_t can_id;
+    uint8_t  can_dlc;
+    uint8_t  __pad;
+    uint8_t  __res0;
+    uint8_t  __res1;
+    uint8_t  data[CAN_DATA_MAX];
+} MiraCanFrame_t;
+
+/** 内部 CAN 帧接收回调 (仅 SDK 内部使用) */
+typedef void (*MiraCanRecvCallback)(uint32_t can_id, const uint8_t *data,
+                                     uint8_t len, void *user_data);
+
+/* 前向声明 (在首次使用 MiraCoMaster * 之前) */
+typedef struct MiraCoMaster MiraCoMaster;
+
+/* 内部 CAN 传输层函数声明 (被 co_master.c / co_sync.c 等使用) */
+int miraculous_can_fd(MiraCanCtx *ctx);
+int miraculous_can_get_epoll_fd(MiraCanCtx *ctx);
+int miraculous_can_set_recv_callback(MiraCanCtx *ctx,
+                                      MiraCanRecvCallback cb,
+                                      void *user_data);
+
+/* SDO 等待队列 — 接收线程模式 */
+int  miraculous_co_sdo_wait_dispatch(MiraCoMaster *co, uint32_t can_id,
+                                      const uint8_t *data, uint8_t len);
+
+/* 接收线程 */
+int  miraculous_co_recv_start(MiraCoMaster *co);
+void miraculous_co_recv_stop(MiraCoMaster *co);
 
 
 /*----------------------------------------------------------------------------
@@ -103,12 +215,20 @@
 
 #define CIA402_SW_STATE_MASK  0x006FU
 
-/*----------------------------------------------------------------------------
- * 内部类型 (外部不可见)
- *----------------------------------------------------------------------------*/
-typedef struct MiraCoMaster MiraCoMaster;
-typedef struct SyncCtx_t SyncCtx_t;
-typedef struct PdoCtx_t PdoCtx_t;
+
+/** 异步 SDO 任务节点 (内部链表) */
+typedef struct MiraSdoAsyncTask {
+    int             tid;
+    uint16_t        index;
+    uint8_t         subindex;
+    bool            is_write;
+    uint8_t         rx_buf[8];
+    uint8_t         rx_len;
+    MiraSdoCallback cb;
+    void           *user_data;
+    struct timespec expire_ts;
+    struct MiraSdoAsyncTask *next;
+} MiraSdoAsyncTask;
 
 /*----------------------------------------------------------------------------
  * MiraMotor 结构体
@@ -125,12 +245,18 @@ struct MiraMotor {
     bool          pdo_valid;  /* TPDO 缓存是否有效 */
     MiraTpdoCallback tpdo_user_cb;    /* 用户 TPDO 回调 */
     void            *tpdo_user_data;  /* 用户 TPDO 回调数据 */
+
+    /* 异步 SDO 任务链表 */
+    MiraSdoAsyncTask *sdo_async_list;
+    pthread_mutex_t   sdo_async_lock;  /* 保护异步任务链表 */
+    int               sdo_async_tid_seed; /* 自增事务 ID */
 };
 
 /*----------------------------------------------------------------------------
  * CANopen 主站内部 API (对外不可见)
  *----------------------------------------------------------------------------*/
-MiraCoMaster* miraculous_co_init(MiraCanCtx *can_ctx, CiaBaudrate_t baudrate);
+MiraCoMaster* miraculous_co_init(MiraCanCtx *can_ctx, CiaBaudrate_t baudrate,
+                                  bool start_recv_thread);
 void miraculous_co_free(MiraCoMaster *co);
 
 int  miraculous_co_nmt_send(MiraCoMaster *co, uint8_t node_id, CoNmtCommand_t cmd);
@@ -194,7 +320,11 @@ int  miraculous_co_bootstrap(MiraCoMaster *co, uint8_t node_id, int timeout_ms);
 MiraCanCtx* miraculous_co_get_can(MiraCoMaster *co);
 SyncCtx_t*  miraculous_co_get_sync(MiraCoMaster *co);
 PdoCtx_t*   miraculous_co_get_pdo(MiraCoMaster *co);
+int         miraculous_co_get_epoll_fd(MiraCoMaster *co);
 void        miraculous_co_ref_inc(MiraCoMaster *co);
 int         miraculous_co_ref_count(MiraCoMaster *co);
 
 #endif /* MIRACULOUS_INTERNAL_H */
+
+/* 异步 SDO 超时检测 (遍历 motor_by_node, 释放超时任务) */
+void miraculous_co_sdo_timeout_check(MiraCoMaster *co);

@@ -20,21 +20,13 @@ int miraculous_motor_pv_move(MiraMotor *motor,
 {
     if (!motor) return MRC_ERROR_INVALID_PARAM;
 
-    /* Step 1: 按需切换模式 (仅在首次或模式变更时) */
-    Cia402Mode_t cur_mode;
-    if (miraculous_motor_get_mode(motor, &cur_mode) == 0 &&
-        cur_mode != CIA_MODE_PV && cur_mode != CIA_MODE_VEL) {
-        int ret = miraculous_motor_set_mode(motor, CIA_MODE_PV);
-        if (ret < 0) return ret;
-    }
-
-    /* Step 2: 运动曲线类型 (0x6086) — 仅首次尝试 */
+    /* Step 1: 运动曲线类型 (0x6086) — 仅首次尝试 */
     static bool profile_set = false;
     if (!profile_set) {
         int8_t pt = (int8_t)profile_type;
         int ret = CO_SDO_WRITE(motor->co, motor->node_id,
                                CIA402_OD_MOTION_PROFILE_TYPE, 0,
-                               &pt, 5);
+                               &pt, MOTION_SDO_TIMEOUT_MS);
         if (ret < 0) {
             fprintf(stderr, "[pv] motion profile type 0x6086 not supported\n");
         }
@@ -43,14 +35,17 @@ int miraculous_motor_pv_move(MiraMotor *motor,
 
     /* Step 3: 轨迹参数 */
     int ret = CO_SDO_WRITE(motor->co, motor->node_id,
-                           CIA402_OD_PROFILE_ACCELERATION, 0, &acc, 5);
+                           CIA402_OD_PROFILE_ACCELERATION, 0,
+                           &acc, MOTION_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     ret = CO_SDO_WRITE(motor->co, motor->node_id,
-                       CIA402_OD_PROFILE_DECELERATION, 0, &dec, 5);
+                       CIA402_OD_PROFILE_DECELERATION, 0,
+                       &dec, MOTION_SDO_TIMEOUT_MS);
     if (ret < 0) return ret;
 
     /* Step 4: 目标速度 — PV 模式即时生效 */
     return CO_SDO_WRITE(motor->co, motor->node_id,
-                        CIA402_OD_TARGET_VELOCITY, 0, &target_vel, 5);
+                        CIA402_OD_TARGET_VELOCITY, 0,
+                        &target_vel, MOTION_SDO_TIMEOUT_MS);
 }

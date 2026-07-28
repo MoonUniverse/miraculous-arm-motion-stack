@@ -30,7 +30,7 @@
 #define STEP_SIZE_RAD       (6.283185307179586f * 4.0f / 10.0f / 360.0f)
 
 /* 每次下发后等待电机到位的时间 (us) */
-#define SETTLE_TIME_US     15000 /* 10 ms */
+#define SETTLE_TIME_US     20000 /* 10 ms */
 
 /* 速度判零阈值 (脉冲/s) */
 #define VELOCITY_ZERO_THRESHOLD  10

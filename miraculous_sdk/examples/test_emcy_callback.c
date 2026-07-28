@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <unistd.h>
 #include "miraculous_sdk.h"
 
 static volatile bool g_quit = false;
@@ -90,13 +91,9 @@ int main(int argc, char **argv)
     printf("EMCY monitor started (listening on COB-ID 0x080+%d)...\n", node_id);
     printf("Press Ctrl+C to exit.\n");
 
-    /* --- 轮询总线: 触发 EMCY 可通过短路/过载等操作模拟 --- */
+    /* --- 等待 EMCY 事件 (由 recv 线程处理) --- */
     while (!g_quit) {
-        int n = miraculous_motor_poll(motor, 500);
-        if (n < 0) {
-            fprintf(stderr, "Poll error: %s\n", mrc_strerror(n));
-            break;
-        }
+        usleep(100000);
     }
 
     miraculous_motor_close(motor);

@@ -60,10 +60,6 @@ int main(int argc, char **argv)
             fprintf(stderr, "CSV set target failed: %s\n", mrc_strerror(ret));
             break;
         }
-
-        /* poll 处理 timerfd，发送 SYNC 帧 */
-        miraculous_motor_poll(motor, 0);
-
         /* 等待一个 SYNC 周期 */
         usleep(sync_period_us);
 

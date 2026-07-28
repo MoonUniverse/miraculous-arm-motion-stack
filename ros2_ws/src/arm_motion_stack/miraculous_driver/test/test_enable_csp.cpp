@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "miraculous_driver/miraculous_arm.hpp"
@@ -37,9 +39,8 @@ struct FakeSdk
   uint8_t wrong_final_state_node = 0;
   size_t fail_sync_call = 0;
   size_t sync_calls = 0;
+  int feedback_delay_ms = 0;
   bool fail_sync_start = false;
-  bool feedback_pending = false;
-  bool feedback_delivered = false;
   bool csp_active_seen_inside_sdk = false;
 };
 
@@ -74,6 +75,11 @@ public:
     arm.cache_valid_ = false;
   }
 
+  static void set_passive(MiraculousArm & arm)
+  {
+    arm.passive_ = true;
+  }
+
   static void deliver_tpdo(MiraculousArm & arm, uint8_t node_id)
   {
     const uint8_t data[8] = {};
@@ -106,6 +112,7 @@ namespace
 
 FakeSdk g_fake;
 MiraculousArm * g_arm = nullptr;
+std::thread g_feedback_thread;
 
 uint8_t node_id(MiraMotor * motor)
 {
@@ -162,11 +169,43 @@ size_t count_event(const std::string & name, uint8_t node = 0)
            }));
 }
 
+void deliver_feedback()
+{
+  if (!g_arm) {
+    return;
+  }
+  for (uint8_t node : g_fake.nodes) {
+    if (node != g_fake.missing_feedback_node) {
+      MiraculousArmTestPeer::deliver_tpdo(*g_arm, node);
+    }
+  }
+}
+
+void schedule_feedback()
+{
+  if (g_fake.feedback_delay_ms <= 0) {
+    deliver_feedback();
+    return;
+  }
+  if (g_feedback_thread.joinable()) {
+    g_feedback_thread.join();
+  }
+  g_feedback_thread = std::thread(
+    []() {
+      std::this_thread::sleep_for(
+        std::chrono::milliseconds(g_fake.feedback_delay_ms));
+      deliver_feedback();
+    });
+}
+
 class EnableCspTest : public ::testing::Test
 {
 protected:
   void SetUp() override
   {
+    if (g_feedback_thread.joinable()) {
+      g_feedback_thread.join();
+    }
     g_fake = FakeSdk{};
     g_fake.nodes = {1, 2};
     for (uint8_t node : g_fake.nodes) {
@@ -180,6 +219,9 @@ protected:
 
   void TearDown() override
   {
+    if (g_feedback_thread.joinable()) {
+      g_feedback_thread.join();
+    }
     g_arm = nullptr;
     MiraculousArmTestPeer::detach(arm_);
   }
@@ -200,6 +242,8 @@ protected:
 
 TEST_F(EnableCspTest, SuccessSeedsEveryAxisBeforeEnableAndRestartsTimerLast)
 {
+  g_fake.feedback_delay_ms = 2;
+
   ASSERT_TRUE(arm_.enable_csp());
   ASSERT_TRUE(arm_.is_csp_enabled());
   EXPECT_TRUE(MiraculousArmTestPeer::timer_running(arm_));
@@ -230,6 +274,51 @@ TEST_F(EnableCspTest, SuccessSeedsEveryAxisBeforeEnableAndRestartsTimerLast)
   EXPECT_LT(last_event("get_state"), first_event("sync_start"));
   EXPECT_LT(syncs.back(), first_event("sync_start"));
   EXPECT_EQ(first_event("sync_stop"), 0u);
+}
+
+TEST_F(EnableCspTest, PassiveFeedbackWaitsForSdkReceiveThread)
+{
+  use_nodes({1, 2}, 0);
+  MiraculousArmTestPeer::set_passive(arm_);
+  g_fake.feedback_delay_ms = 2;
+
+  FeedbackSample sample;
+  ASSERT_TRUE(arm_.read_passive_feedback(sample, 50));
+  EXPECT_EQ(sample.sequence, 1u);
+  EXPECT_DOUBLE_EQ(sample.positions_rad[0], g_fake.positions[1]);
+  EXPECT_DOUBLE_EQ(sample.positions_rad[1], g_fake.positions[2]);
+  EXPECT_EQ(count_event("sync_send"), 1u);
+}
+
+TEST_F(EnableCspTest, PassiveFeedbackRejectsIncompleteGenerationSet)
+{
+  use_nodes({1, 2}, 0);
+  MiraculousArmTestPeer::set_passive(arm_);
+  g_fake.missing_feedback_node = 2;
+
+  FeedbackSample sample;
+  EXPECT_FALSE(arm_.read_passive_feedback(sample, 5));
+  EXPECT_EQ(sample.sequence, 0u);
+  EXPECT_EQ(count_event("sync_send"), 1u);
+}
+
+TEST_F(EnableCspTest, ManualTargetCycleWaitsForSdkReceiveThread)
+{
+  use_nodes({1, 2}, 0);
+  g_fake.feedback_delay_ms = 2;
+  ASSERT_TRUE(arm_.enable_csp());
+
+  std::array<double, kArmJoints> targets{};
+  targets[0] = 0.3;
+  targets[1] = -0.4;
+  ASSERT_TRUE(arm_.set_targets_rad(targets));
+
+  EXPECT_EQ(count_event("sync_send"), 4u);
+  EXPECT_LT(last_event("target"), last_event("sync_send"));
+  std::array<double, kArmJoints> feedback{};
+  ASSERT_TRUE(arm_.get_positions_rad(feedback));
+  EXPECT_DOUBLE_EQ(feedback[0], g_fake.positions[1]);
+  EXPECT_DOUBLE_EQ(feedback[1], g_fake.positions[2]);
 }
 
 TEST_F(EnableCspTest, MissingFreshFeedbackNeverEnablesOrRestartsTimer)
@@ -385,28 +474,7 @@ int __wrap_miraculous_motor_sync_send(MiraMotor * motor)
   if (fake.fail_sync_call == fake.sync_calls) {
     return MRC_ERROR_CAN_SEND;
   }
-  if (fake.sync_calls == 1) {
-    fake.feedback_pending = true;
-  }
-  return MRC_SUCCESS;
-}
-
-int __wrap_miraculous_motor_poll(MiraMotor * motor, int timeout_ms)
-{
-  (void)timeout_ms;
-  auto & fake = miraculous_driver::g_fake;
-  miraculous_driver::record("poll", miraculous_driver::node_id(motor));
-  if (fake.feedback_pending && !fake.feedback_delivered &&
-    miraculous_driver::g_arm)
-  {
-    for (uint8_t node : fake.nodes) {
-      if (node != fake.missing_feedback_node) {
-        miraculous_driver::MiraculousArmTestPeer::deliver_tpdo(
-          *miraculous_driver::g_arm, node);
-      }
-    }
-    fake.feedback_delivered = true;
-  }
+  miraculous_driver::schedule_feedback();
   return MRC_SUCCESS;
 }
 
@@ -480,6 +548,17 @@ int __wrap_miraculous_motor_get_position_ex(
   const uint8_t node = miraculous_driver::node_id(motor);
   miraculous_driver::record("get_position", node);
   *position = miraculous_driver::g_fake.positions[node];
+  return MRC_SUCCESS;
+}
+
+int __wrap_miraculous_motor_get_velocity_ex(
+  MiraMotor * motor, float * velocity, VelSide_t side, VelUnit_t unit)
+{
+  (void)side;
+  (void)unit;
+  const uint8_t node = miraculous_driver::node_id(motor);
+  miraculous_driver::record("get_velocity", node);
+  *velocity = miraculous_driver::g_fake.positions[node] * 10.0f;
   return MRC_SUCCESS;
 }
 
