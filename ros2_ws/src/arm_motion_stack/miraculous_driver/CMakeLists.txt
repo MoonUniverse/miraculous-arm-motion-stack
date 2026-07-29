@@ -131,6 +131,11 @@ if(BUILD_TESTING)
        -Wl,--wrap=miraculous_motor_disable_voltage \
        -Wl,--wrap=miraculous_motor_fault_reset"
   )
+
+  ament_add_gtest(test_playback_csv_header
+    test/test_playback_csv_header.cpp
+  )
+  target_include_directories(test_playback_csv_header PRIVATE src)
 endif()
 
 # ---- pluginlib export ----

@@ -18,10 +18,13 @@
 #include "std_srvs/srv/trigger.hpp"
 
 #include "miraculous_driver/miraculous_arm.hpp"
+#include "playback_csv_header.hpp"
 
 using miraculous_driver::ArmConfig;
+using miraculous_driver::CsvHeaderFormat;
 using miraculous_driver::JointConfig;
 using miraculous_driver::MiraculousArm;
+using miraculous_driver::classify_playback_csv_header;
 using miraculous_driver::kArmJoints;
 
 namespace
@@ -198,8 +201,9 @@ bool load_csv(
     return false;
   }
   const auto header = split_csv_line(line);
+  const auto header_format = classify_playback_csv_header(header, kArmJoints);
   std::vector<size_t> columns;
-  if (header.size() == kArmJoints + 1 && header[0] == "timestamp") {
+  if (header_format == CsvHeaderFormat::kLegacy) {
     trajectory.is_v2 = false;
     for (size_t i = 0; i < kArmJoints; ++i) {
       const std::string expected = std::string("J") + std::to_string(i + 1);
@@ -210,9 +214,7 @@ bool load_csv(
       trajectory.joint_mask[i] = true;
       columns.push_back(i);
     }
-  } else if (header.size() >= 3 &&
-    header[0] == "timestamp" && header[1] == "sample_index")
-  {
+  } else if (header_format == CsvHeaderFormat::kV2) {
     trajectory.is_v2 = true;
     for (size_t column = 2; column < header.size(); ++column) {
       size_t joint_index = 0;
