@@ -46,6 +46,9 @@ struct ArmConfig
   double reduction_ratio = 100.0;
   double read_rate_hz = 100.0;                ///< background read thread frequency
   double state_poll_rate_hz = 0.0;            ///< statusword SDO polling; 0 disables it
+  /// Maximum wait for a complete TPDO2 set after a driver-owned manual SYNC.
+  /// The wait returns immediately once all configured joints respond.
+  uint32_t manual_feedback_timeout_ms = 5;
   /// Register the SDK's dedicated EMCY callback (miraculous_motor_set_emcy_callback).
   /// Never use miraculous_can_set_recv_callback here: the SDK's CANopen master
   /// occupies that slot for its own RX dispatch (TPDO cache / heartbeat / EMCY)

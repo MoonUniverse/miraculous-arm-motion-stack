@@ -29,6 +29,12 @@ bool MiraculousArm::validate_config(const ArmConfig & config, const char * calle
       caller, kArmJoints, config.joints.size());
     return false;
   }
+  if (config.manual_feedback_timeout_ms == 0) {
+    std::fprintf(stderr,
+      "[miraculous_arm] %s: manual_feedback_timeout_ms must be greater than 0\n",
+      caller);
+    return false;
+  }
   std::array<bool, kArmJoints> seen{};
   std::array<bool, 128> seen_node_ids{};
   for (const auto & joint : config.joints) {
@@ -956,7 +962,9 @@ bool MiraculousArm::set_targets_rad(const std::array<double, kArmJoints> & targe
       // The latest SDK dispatches TPDOs from its receive thread. Allow enough
       // scheduling margin for the callback without adding fixed latency:
       // condition_variable wakes as soon as every joint has responded.
-      if (!refresh_feedback_locked(true, 5)) {
+      if (!refresh_feedback_locked(
+          true, static_cast<int>(config_.manual_feedback_timeout_ms)))
+      {
         ok = false;
       }
     }

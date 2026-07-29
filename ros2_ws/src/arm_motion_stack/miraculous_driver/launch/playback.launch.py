@@ -23,6 +23,7 @@ def generate_launch_description():
     approach_rate_hz = LaunchConfiguration("approach_rate_hz")
     approach_min_duration_s = LaunchConfiguration("approach_min_duration_s")
     start_tolerance_rad = LaunchConfiguration("start_tolerance_rad")
+    feedback_timeout_ms = LaunchConfiguration("feedback_timeout_ms")
 
     arm_description_share = get_package_share_directory("arm_description")
     robot_xacro = os.path.join(arm_description_share, "urdf", "arm.urdf.xacro")
@@ -54,6 +55,7 @@ def generate_launch_description():
             "approach_rate_hz": approach_rate_hz,
             "approach_min_duration_s": approach_min_duration_s,
             "start_tolerance_rad": start_tolerance_rad,
+            "feedback_timeout_ms": feedback_timeout_ms,
         }],
     )
 
@@ -73,6 +75,7 @@ def generate_launch_description():
         DeclareLaunchArgument("approach_rate_hz", default_value="50.0"),
         DeclareLaunchArgument("approach_min_duration_s", default_value="0.5"),
         DeclareLaunchArgument("start_tolerance_rad", default_value="0.005"),
+        DeclareLaunchArgument("feedback_timeout_ms", default_value="10"),
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",

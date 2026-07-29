@@ -80,6 +80,11 @@ public:
     arm.passive_ = true;
   }
 
+  static void set_manual_feedback_timeout(MiraculousArm & arm, uint32_t timeout_ms)
+  {
+    arm.config_.manual_feedback_timeout_ms = timeout_ms;
+  }
+
   static void deliver_tpdo(MiraculousArm & arm, uint8_t node_id)
   {
     const uint8_t data[8] = {};
@@ -305,8 +310,9 @@ TEST_F(EnableCspTest, PassiveFeedbackRejectsIncompleteGenerationSet)
 TEST_F(EnableCspTest, ManualTargetCycleWaitsForSdkReceiveThread)
 {
   use_nodes({1, 2}, 0);
-  g_fake.feedback_delay_ms = 2;
   ASSERT_TRUE(arm_.enable_csp());
+  MiraculousArmTestPeer::set_manual_feedback_timeout(arm_, 10);
+  g_fake.feedback_delay_ms = 6;
 
   std::array<double, kArmJoints> targets{};
   targets[0] = 0.3;
@@ -319,6 +325,17 @@ TEST_F(EnableCspTest, ManualTargetCycleWaitsForSdkReceiveThread)
   ASSERT_TRUE(arm_.get_positions_rad(feedback));
   EXPECT_DOUBLE_EQ(feedback[0], g_fake.positions[1]);
   EXPECT_DOUBLE_EQ(feedback[1], g_fake.positions[2]);
+}
+
+TEST_F(EnableCspTest, ManualTargetCycleRejectsFeedbackPastConfiguredDeadline)
+{
+  use_nodes({1, 2}, 0);
+  ASSERT_TRUE(arm_.enable_csp());
+  g_fake.feedback_delay_ms = 6;
+
+  std::array<double, kArmJoints> targets{};
+  EXPECT_FALSE(arm_.set_targets_rad(targets));
+  EXPECT_EQ(count_event("sync_send"), 4u);
 }
 
 TEST_F(EnableCspTest, MissingFreshFeedbackNeverEnablesOrRestartsTimer)

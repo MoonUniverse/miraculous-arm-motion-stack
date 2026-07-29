@@ -494,7 +494,8 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver playback.launch.py \
   approach_velocity_rad_s:=0.03 \
   approach_rate_hz:=50.0 \
   approach_min_duration_s:=1.0 \
-  start_tolerance_rad:=0.003
+  start_tolerance_rad:=0.003 \
+  feedback_timeout_ms:=10
 ```
 
 `speed_scale:=0.25` 表示按原轨迹四倍时间慢速回放。代码使用：
@@ -672,7 +673,8 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver playback.launch.py \
   approach_velocity_rad_s:=0.02 \
   approach_rate_hz:=50.0 \
   approach_min_duration_s:=1.5 \
-  start_tolerance_rad:=0.003
+  start_tolerance_rad:=0.003 \
+  feedback_timeout_ms:=10
 ```
 
 开始：
@@ -739,7 +741,8 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver playback.launch.py \
   approach_velocity_rad_s:=0.02 \
   approach_rate_hz:=50.0 \
   approach_min_duration_s:=1.5 \
-  start_tolerance_rad:=0.003
+  start_tolerance_rad:=0.003 \
+  feedback_timeout_ms:=10
 ```
 
 这里三项限位按活动关节顺序对应 J1、J3、J5。也可以传六项完整 J1 至 J6 限位，
@@ -793,7 +796,8 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver playback.launch.py \
   approach_velocity_rad_s:=0.01 \
   approach_rate_hz:=50.0 \
   approach_min_duration_s:=2.0 \
-  start_tolerance_rad:=0.003
+  start_tolerance_rad:=0.003 \
+  feedback_timeout_ms:=10
 ```
 
 首轮六轴示教动作要短、小、慢，避免同时做大幅度关节运动。

@@ -324,6 +324,7 @@ public:
     approach_min_duration_s_ =
       declare_parameter<double>("approach_min_duration_s", 0.5);
     start_tolerance_rad_ = declare_parameter<double>("start_tolerance_rad", 0.005);
+    feedback_timeout_ms_ = declare_parameter<int>("feedback_timeout_ms", 10);
 
     const auto node_ids = parse_int_list(node_ids_str, {1, 2, 3, 4, 5, 6});
     const auto joint_indices =
@@ -370,7 +371,8 @@ public:
       !std::isfinite(approach_rate_hz_) || approach_rate_hz_ <= 0.0 ||
       approach_rate_hz_ > 200.0 ||
       !std::isfinite(approach_min_duration_s_) || approach_min_duration_s_ < 0.0 ||
-      !std::isfinite(start_tolerance_rad_) || start_tolerance_rad_ < 0.0)
+      !std::isfinite(start_tolerance_rad_) || start_tolerance_rad_ < 0.0 ||
+      feedback_timeout_ms_ <= 0)
     {
       RCLCPP_FATAL(get_logger(), "invalid playback timing/safety parameters");
       throw std::runtime_error("bad playback parameters");
@@ -381,6 +383,8 @@ public:
     config.baudrate = static_cast<CiaBaudrate_t>(baudrate_);
     config.sync_period_us = 0;
     config.read_rate_hz = 100.0;
+    config.manual_feedback_timeout_ms =
+      static_cast<uint32_t>(feedback_timeout_ms_);
     for (size_t i = 0; i < node_ids.size(); ++i) {
       const size_t joint_index = static_cast<size_t>(joint_indices[i]);
       JointConfig joint;
@@ -732,6 +736,7 @@ private:
   double approach_rate_hz_{50.0};
   double approach_min_duration_s_{0.5};
   double start_tolerance_rad_{0.005};
+  int feedback_timeout_ms_{10};
   std::vector<JointConfig> joints_;
   std::array<bool, kArmJoints> configured_joint_mask_{};
 

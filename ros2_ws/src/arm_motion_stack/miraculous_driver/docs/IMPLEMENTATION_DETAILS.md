@@ -369,6 +369,7 @@ class MiraculousArm {
 | `approach_rate_hz` | `50.0` | 首点过渡命令频率 |
 | `approach_min_duration_s` | `0.5` | 首点过渡最短时间 |
 | `start_tolerance_rad` | `0.005` | 与首点差值低于该值时跳过长过渡 |
+| `feedback_timeout_ms` | `10` | 手动 CSP SYNC 等待完整 TPDO2 反馈的最大时间 |
 
 ---
 
@@ -497,7 +498,8 @@ ros2 launch miraculous_driver playback.launch.py \
   position_max:=0.5,0.5 \
   input_file:=/tmp/teach_j1_j3_v2.csv \
   approach_velocity_rad_s:=0.1 \
-  approach_rate_hz:=50.0
+  approach_rate_hz:=50.0 \
+  feedback_timeout_ms:=10
 
 # 开始回放
 ros2 service call /playback/play std_srvs/srv/Trigger
