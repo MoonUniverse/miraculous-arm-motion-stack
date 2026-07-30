@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <future>
 #include <string>
 #include <thread>
 #include <vector>
@@ -89,6 +90,16 @@ public:
   {
     const uint8_t data[8] = {};
     MiraculousArm::tpdo_trampoline(node_id, 2, data, sizeof(data), &arm);
+  }
+
+  static std::unique_lock<std::mutex> lock_feedback_wait(MiraculousArm & arm)
+  {
+    return std::unique_lock<std::mutex>(arm.feedback_wait_mutex_);
+  }
+
+  static uint64_t tpdo_generation(const MiraculousArm & arm, size_t joint_index)
+  {
+    return arm.tpdo2_generation_[joint_index].load(std::memory_order_acquire);
   }
 
   static bool exclusive_io(const MiraculousArm & arm)
@@ -305,6 +316,37 @@ TEST_F(EnableCspTest, PassiveFeedbackRejectsIncompleteGenerationSet)
   EXPECT_FALSE(arm_.read_passive_feedback(sample, 5));
   EXPECT_EQ(sample.sequence, 0u);
   EXPECT_EQ(count_event("sync_send"), 1u);
+}
+
+TEST_F(EnableCspTest, TpdoPublicationSerializesWithFeedbackPredicate)
+{
+  use_nodes({1}, 0);
+  std::future<void> callback_future;
+  auto feedback_lock = MiraculousArmTestPeer::lock_feedback_wait(arm_);
+
+  std::promise<void> callback_started;
+  auto callback_started_future = callback_started.get_future();
+  callback_future = std::async(
+    std::launch::async,
+    [&]() {
+      callback_started.set_value();
+      MiraculousArmTestPeer::deliver_tpdo(arm_, 1);
+    });
+
+  EXPECT_EQ(
+    callback_started_future.wait_for(std::chrono::seconds(1)),
+    std::future_status::ready);
+  EXPECT_EQ(
+    callback_future.wait_for(std::chrono::milliseconds(20)),
+    std::future_status::timeout);
+  EXPECT_EQ(MiraculousArmTestPeer::tpdo_generation(arm_, 0), 0u);
+
+  feedback_lock.unlock();
+  ASSERT_EQ(
+    callback_future.wait_for(std::chrono::seconds(1)),
+    std::future_status::ready);
+  callback_future.get();
+  EXPECT_EQ(MiraculousArmTestPeer::tpdo_generation(arm_, 0), 1u);
 }
 
 TEST_F(EnableCspTest, ManualTargetCycleWaitsForSdkReceiveThread)

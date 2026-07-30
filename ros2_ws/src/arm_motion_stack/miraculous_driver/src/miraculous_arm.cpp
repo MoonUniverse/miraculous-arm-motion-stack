@@ -1232,8 +1232,15 @@ void MiraculousArm::tpdo_trampoline(
   }
   for (const auto & joint : self->config_.joints) {
     if (joint.node_id == node_id) {
-      self->tpdo2_generation_[joint.joint_index].fetch_add(
-        1, std::memory_order_release);
+      // Serialize the predicate update with wait_until(). Without this mutex,
+      // notify_all() can land after all_fresh() returns false but before the
+      // waiter blocks, forcing an otherwise-complete cycle to sleep until its
+      // deadline. Notify after unlocking so the waiter can reacquire promptly.
+      {
+        std::lock_guard<std::mutex> lock(self->feedback_wait_mutex_);
+        self->tpdo2_generation_[joint.joint_index].fetch_add(
+          1, std::memory_order_release);
+      }
       self->feedback_cv_.notify_all();
       return;
     }
