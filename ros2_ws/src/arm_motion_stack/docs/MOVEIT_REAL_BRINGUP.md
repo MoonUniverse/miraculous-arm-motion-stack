@@ -6,6 +6,9 @@
 第一阶段只验收关节空间的小步运动、取消和故障停机，不执行位姿目标或笛卡尔
 轨迹。当前 `tool0` 仍是零偏移占位坐标系，不能作为真实 TCP 使用。
 
+整体架构、命令/反馈/故障数据流和分层测试依据见：
+`docs/MOVEIT_REAL_INTEGRATION_DESIGN.md`。
+
 ## 1. 已实现的安全边界
 
 - `moveit_real.launch.py` 只接受完整六轴 profile。

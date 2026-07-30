@@ -2,6 +2,10 @@
 
 本文档记录当前 `arm_motion_stack` 的实现细节、关键配置、运行链路、已处理的 MoveIt 报错，以及后续扩展路径。它用于后续维护和排查，不替代顶层 `README.md` 的快速启动说明。
 
+真机 MoveIt 的安全架构、命令/反馈/故障数据流和分层测试基线单独记录在
+`MOVEIT_REAL_INTEGRATION_DESIGN.md`；实际上机操作按
+`MOVEIT_REAL_BRINGUP.md` 执行。
+
 ## 1. 项目边界
 
 当前项目基于已有机械臂 URDF 搭建 ROS 2 + MoveIt 2 + ros2_control + Isaac Sim 预留仿真栈。

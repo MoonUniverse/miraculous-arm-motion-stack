@@ -3,9 +3,11 @@
 Last updated: 2026-07-30
 
 This document records the context used to implement the first real Miraculous
-arm MoveIt integration. The implementation landed in the working tree on
-2026-07-30; real-hardware acceptance is still pending calibrated limits. The
-operator runbook is `docs/MOVEIT_REAL_BRINGUP.md`.
+arm MoveIt integration. The implementation baseline is commit `f298255`;
+real-hardware acceptance is still pending calibrated limits. The operator
+runbook is `docs/MOVEIT_REAL_BRINGUP.md`.
+The architecture and test baseline are recorded in
+`docs/MOVEIT_REAL_INTEGRATION_DESIGN.md`.
 
 ## Repository State
 

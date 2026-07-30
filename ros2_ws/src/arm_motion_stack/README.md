@@ -377,6 +377,13 @@ The current real hardware path is implemented in `miraculous_driver` through the
 ros2_ws/src/arm_motion_stack/docs/MOVEIT_REAL_BRINGUP.md
 ```
 
+Architecture, command/feedback/fault data flow, lifecycle design, and the
+layered test baseline are documented in:
+
+```text
+ros2_ws/src/arm_motion_stack/docs/MOVEIT_REAL_INTEGRATION_DESIGN.md
+```
+
 The production profile intentionally ships with `calibrated: false`. After six
 reviewed position limits are installed, the real launch still starts both
 hardware and trajectory controller inactive; follow the runbook's explicit
