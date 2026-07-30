@@ -34,6 +34,7 @@ get_filename_component(MIRACULOUS_SDK_LIBDIR "${MIRACULOUS_SDK_LIB}" DIRECTORY)
 message(STATUS "miraculous_sdk: include=${MIRACULOUS_SDK_DIR}/include lib=${MIRACULOUS_SDK_LIB}")
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -96,6 +97,9 @@ set_target_properties(trajectory_tracking_test_node PROPERTIES INSTALL_RPATH "$O
 # ---- tests -----------------------------------------------------------------
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
+
+  ament_add_pytest_test(test_real_arm_profile test/test_real_arm_profile.py)
 
   ament_add_gtest(test_enable_csp
     test/test_enable_csp.cpp
@@ -136,6 +140,21 @@ if(BUILD_TESTING)
     test/test_playback_csv_header.cpp
   )
   target_include_directories(test_playback_csv_header PRIVATE src)
+
+  ament_add_gtest(test_miraculous_system
+    test/test_miraculous_system.cpp
+  )
+  target_include_directories(test_miraculous_system
+    PRIVATE
+      include
+      ${MIRACULOUS_SDK_DIR}/include
+  )
+  target_link_libraries(test_miraculous_system ${PROJECT_NAME})
+  ament_target_dependencies(test_miraculous_system
+    hardware_interface
+    rclcpp
+    rclcpp_lifecycle
+  )
 endif()
 
 # ---- pluginlib export ----
@@ -166,6 +185,9 @@ endif()
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config docs launch DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS scripts/plot_trajectory.py DESTINATION lib/${PROJECT_NAME})
+ament_python_install_package(${PROJECT_NAME}
+  PACKAGE_DIR python/${PROJECT_NAME}
+)
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(

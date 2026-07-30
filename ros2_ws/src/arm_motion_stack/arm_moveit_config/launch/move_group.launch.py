@@ -47,7 +47,7 @@ def generate_launch_description():
         "robot_description_planning": load_yaml("arm_moveit_config", "config/joint_limits.yaml")
     }
     ompl_planning = load_yaml("arm_moveit_config", "config/ompl_planning.yaml")
-    controllers = load_yaml("arm_moveit_config", "config/controllers.yaml")
+    controllers = load_yaml("arm_moveit_config", "config/moveit_controllers.yaml")
     trajectory_execution = {
         "allow_trajectory_execution": True,
         "moveit_manage_controllers": False,

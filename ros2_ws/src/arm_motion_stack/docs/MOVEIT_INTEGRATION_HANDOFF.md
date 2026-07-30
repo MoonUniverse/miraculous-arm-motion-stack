@@ -2,9 +2,10 @@
 
 Last updated: 2026-07-30
 
-This document is the starting context for integrating the real Miraculous arm
-driver with MoveIt. Verify the live Git and hardware state before changing
-code; commit IDs below describe the state at the time this handoff was written.
+This document records the context used to implement the first real Miraculous
+arm MoveIt integration. The implementation landed in the working tree on
+2026-07-30; real-hardware acceptance is still pending calibrated limits. The
+operator runbook is `docs/MOVEIT_REAL_BRINGUP.md`.
 
 ## Repository State
 
@@ -128,8 +129,8 @@ validate these existing components before adding new ones:
 - MoveIt joint limits: `arm_moveit_config/config/joint_limits.yaml`
 - MoveIt controller mapping:
   `arm_moveit_config/config/moveit_controllers.yaml`
-- ros2_control controller configuration:
-  `arm_moveit_config/config/controllers.yaml`
+- Versioned real-arm profile:
+  `miraculous_driver/config/real_arm_profile.yaml`
 
 The intended real-hardware command path is:
 
@@ -157,7 +158,34 @@ TPDO2
 Do not route MoveIt execution through `playback_node`; that node is a dedicated
 CSV teaching tool, not the ros2_control hardware interface.
 
-## First MoveIt Audit
+## Implemented MoveIt Audit Outcomes
+
+The implementation now:
+
+- refuses real MoveIt launch until all six reviewed limits are present and
+  `calibrated: true`;
+- starts `ARMSystem` and `arm_controller` inactive for explicit operator
+  activation;
+- rejects malformed/non-finite parameters and unsafe encoder seeds;
+- treats command, feedback freshness, EMCY, and drive faults as latched
+  quick-stop failures that require process restart;
+- uses closed-loop JointTrajectoryController feedback and conservative
+  provisional velocity/acceleration limits;
+- provides `moveit_joint_smoke_test` for a guarded current-relative joint step;
+- keeps `moveit_controllers.yaml` as the only MoveIt controller mapping.
+
+The remaining milestone is staged real-hardware acceptance using
+`MOVEIT_REAL_BRINGUP.md`.
+
+Offline validation completed with a clean isolated build, 36 passing tests,
+real-xacro `check_urdf`, fail-closed launch rejection for the uncalibrated
+profile, and successful guarded fake planning/execution. During the fake
+launch's final `Ctrl-C`, MoveIt 2.5.9 produced a class-loader teardown
+segmentation fault after controller_manager had already deactivated controllers
+and shut down the hardware successfully. Track that MoveGroup teardown issue
+separately; do not confuse it with a trajectory or hardware-stop failure.
+
+## Original Audit Checklist
 
 Perform this audit before editing:
 

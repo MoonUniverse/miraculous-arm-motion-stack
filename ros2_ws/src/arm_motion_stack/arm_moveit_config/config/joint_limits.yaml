@@ -4,46 +4,46 @@ joint_limits:
     min_position: -3.14
     max_position: 3.14
     has_velocity_limits: true
-    max_velocity: 1.0  # TODO: replace URDF velocity=0 with real actuator limit.
+    max_velocity: 0.05  # Conservative provisional limit; real launch overrides from profile.
     has_acceleration_limits: true
-    max_acceleration: 1.0  # TODO: replace with measured/rated acceleration.
+    max_acceleration: 0.10  # Conservative provisional limit.
   J2:
     has_position_limits: true
     min_position: -1.57
     max_position: 1.57
     has_velocity_limits: true
-    max_velocity: 1.0  # TODO: replace URDF velocity=0 with real actuator limit.
+    max_velocity: 0.05
     has_acceleration_limits: true
-    max_acceleration: 1.0  # TODO: replace with measured/rated acceleration.
+    max_acceleration: 0.10
   J3:
     has_position_limits: true
     min_position: -3.14
     max_position: 3.14
     has_velocity_limits: true
-    max_velocity: 1.0  # TODO: replace URDF velocity=0 with real actuator limit.
+    max_velocity: 0.05
     has_acceleration_limits: true
-    max_acceleration: 1.0  # TODO: replace with measured/rated acceleration.
+    max_acceleration: 0.10
   J4:
     has_position_limits: true
     min_position: -1.57
     max_position: 1.57
     has_velocity_limits: true
-    max_velocity: 1.0  # TODO: replace URDF velocity=0 with real actuator limit.
+    max_velocity: 0.05
     has_acceleration_limits: true
-    max_acceleration: 1.0  # TODO: replace with measured/rated acceleration.
+    max_acceleration: 0.10
   J5:
     has_position_limits: true
     min_position: -3.14
     max_position: 3.14
     has_velocity_limits: true
-    max_velocity: 1.0  # TODO: replace URDF velocity=0 with real actuator limit.
+    max_velocity: 0.05
     has_acceleration_limits: true
-    max_acceleration: 1.0  # TODO: replace with measured/rated acceleration.
+    max_acceleration: 0.10
   J6:
     has_position_limits: true
     min_position: -1.57
     max_position: 1.57
     has_velocity_limits: true
-    max_velocity: 1.0  # TODO: replace URDF velocity=0 with real actuator limit.
+    max_velocity: 0.05
     has_acceleration_limits: true
-    max_acceleration: 1.0  # TODO: replace with measured/rated acceleration.
+    max_acceleration: 0.10

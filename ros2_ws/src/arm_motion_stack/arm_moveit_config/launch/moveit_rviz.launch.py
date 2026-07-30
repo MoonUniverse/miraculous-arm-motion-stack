@@ -44,7 +44,7 @@ def generate_launch_description():
         {"robot_description_kinematics": load_yaml("arm_moveit_config", "config/kinematics.yaml")},
         {"robot_description_planning": load_yaml("arm_moveit_config", "config/joint_limits.yaml")},
         load_yaml("arm_moveit_config", "config/ompl_planning.yaml"),
-        load_yaml("arm_moveit_config", "config/controllers.yaml"),
+        load_yaml("arm_moveit_config", "config/moveit_controllers.yaml"),
         {"use_sim_time": use_sim_time},
     ]
 

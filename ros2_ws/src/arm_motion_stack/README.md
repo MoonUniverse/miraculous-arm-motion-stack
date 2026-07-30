@@ -70,8 +70,10 @@ base_link
 - Collision geometry: present for `base_link`, `J1`, `J2`, `J3`, `J4`, `J5`, `J6`.
 - Inertial data: present for `base_link`, `J1`, `J2`, `J3`, `J4`, `J5`, `J6`.
 - Joint effort limits: present but all are `0`; treated as TODO.
-- Joint velocity limits: present but all are `0`; temporary MoveIt/ros2_control test values are used.
-- Joint acceleration limits: absent from URDF; temporary MoveIt test values are used.
+- Joint velocity limits: present but all are `0`; MoveIt uses a conservative
+  provisional `0.05 rad/s`.
+- Joint acceleration limits: absent from URDF; MoveIt uses a conservative
+  provisional `0.10 rad/s²`.
 - Mesh units: STL files came from SolidWorks. The URDF dimensions appear meter-scale from joint origins, but STL unit metadata is not reliable. Verify mm/m scale in RViz and Isaac Sim before dynamics or collision tuning.
 
 ## Packages
@@ -84,6 +86,8 @@ base_link
 - `arm_dynamics`: placeholder dynamics interface for future Pinocchio.
 - `arm_planning_examples`: MoveIt planning examples.
 - `arm_interfaces`: custom FK/IK services and trajectory status message.
+- `miraculous_driver`: real CANopen hardware plugin, calibrated profile,
+  controller configuration, and guarded real-MoveIt launch.
 
 ## Dependencies
 
@@ -293,6 +297,7 @@ ros2 run arm_planning_examples plan_to_joint_target --ros-args -p execute:=false
 ros2 run arm_planning_examples plan_to_pose_target --ros-args -p execute:=false
 ros2 run arm_planning_examples plan_cartesian_path --ros-args -p execute:=false
 ros2 run arm_planning_examples execute_named_pose --ros-args -p pose:=ready -p execute:=false
+ros2 run arm_planning_examples moveit_joint_smoke_test
 ```
 
 The FK/IK/planning example nodes auto-load `robot_description`, SRDF, and KDL kinematics parameters from the installed `arm_description` and `arm_moveit_config` packages.
@@ -366,12 +371,16 @@ MoveIt currently uses standard time parameterization. Add Ruckig by installing t
 
 The current real hardware path is implemented in `miraculous_driver` through the
 `miraculous_driver/MiraculousSystem` ros2_control plugin and
-`hardware_type:=real`. Use the first-stage runbook before attempting full
-MoveIt execution:
+`hardware_type:=real`. Use the fail-closed real MoveIt runbook:
 
 ```text
-ros2_ws/src/arm_motion_stack/miraculous_driver/docs/REAL_HARDWARE_BRINGUP.md
+ros2_ws/src/arm_motion_stack/docs/MOVEIT_REAL_BRINGUP.md
 ```
+
+The production profile intentionally ships with `calibrated: false`. After six
+reviewed position limits are installed, the real launch still starts both
+hardware and trajectory controller inactive; follow the runbook's explicit
+activation order.
 
 Keep the controller names and joints stable:
 

@@ -651,6 +651,8 @@ bool MiraculousArm::enable_csp()
       cached_states_[i] = CIA_STATE_OPERATION_ENABLED;
     }
     cache_valid_ = true;
+    ++cache_sequence_;
+    cache_stamp_ = std::chrono::steady_clock::now();
   }
   passive_ = false;
   csp_active_.store(true, std::memory_order_release);
@@ -672,13 +674,14 @@ bool MiraculousArm::enable()
   return true;
 }
 
-void MiraculousArm::disable()
+bool MiraculousArm::disable()
 {
   if (!initialized_) {
-    return;
+    return false;
   }
   const bool was_active = csp_active_.exchange(false, std::memory_order_acq_rel);
   bool release_exclusive_io = true;
+  bool commands_ok = true;
   {
     std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
     // A caller may defensively call disable() after enable_csp() already
@@ -692,7 +695,11 @@ void MiraculousArm::disable()
       // enable_csp() can start without calling csp_init again.
       for (const auto & joint : config_.joints) {
         if (motors_[joint.joint_index]) {
-          miraculous_motor_disable(motors_[joint.joint_index]);
+          if (miraculous_motor_disable(motors_[joint.joint_index]) < 0) {
+            commands_ok = false;
+          }
+        } else {
+          commands_ok = false;
         }
       }
     }
@@ -700,6 +707,7 @@ void MiraculousArm::disable()
   // Keep the read thread out of the SDK until every motor is disabled. Once
   // released it resumes the inactive-mode SYNC/TPDO feedback path.
   exclusive_sdk_io_.store(!release_exclusive_io, std::memory_order_release);
+  return release_exclusive_io && commands_ok;
 }
 
 bool MiraculousArm::disable_voltage_locked(int timeout_ms)
@@ -810,21 +818,27 @@ bool MiraculousArm::disable_voltage()
   return ok;
 }
 
-void MiraculousArm::quick_stop()
+bool MiraculousArm::quick_stop()
 {
   if (!initialized_) {
-    return;
+    return false;
   }
   csp_active_ = false;
+  bool ok = true;
   {
     std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
     for (const auto & joint : config_.joints) {
       if (motors_[joint.joint_index]) {
-        miraculous_motor_quick_stop(motors_[joint.joint_index]);
+        if (miraculous_motor_quick_stop(motors_[joint.joint_index]) < 0) {
+          ok = false;
+        }
+      } else {
+        ok = false;
       }
     }
   }
   exclusive_sdk_io_.store(false, std::memory_order_release);
+  return ok;
 }
 
 bool MiraculousArm::fault_reset()
@@ -862,6 +876,19 @@ bool MiraculousArm::get_velocities_rad(std::array<double, kArmJoints> & velociti
   std::lock_guard<std::mutex> lock(state_mutex_);
   velocities = cached_vel_rad_;
   return cache_valid_;
+}
+
+bool MiraculousArm::get_feedback_snapshot(FeedbackSnapshot & snapshot) const
+{
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  if (!cache_valid_) {
+    return false;
+  }
+  snapshot.sequence = cache_sequence_;
+  snapshot.stamp = cache_stamp_;
+  snapshot.positions_rad = cached_pos_rad_;
+  snapshot.velocities_rad_s = cached_vel_rad_;
+  return true;
 }
 
 bool MiraculousArm::get_states(std::array<Cia402State_t, kArmJoints> & states) const
@@ -929,6 +956,8 @@ bool MiraculousArm::read_passive_feedback(FeedbackSample & sample, int timeout_m
       cached_vel_rad_[i] = fresh.velocities_rad_s[i];
     }
     cache_valid_ = true;
+    ++cache_sequence_;
+    cache_stamp_ = std::chrono::steady_clock::now();
   }
   sample = fresh;
   return true;
@@ -939,7 +968,11 @@ bool MiraculousArm::read_passive_feedback(FeedbackSample & sample, int timeout_m
 bool MiraculousArm::set_targets_rad(const std::array<double, kArmJoints> & targets)
 {
   std::array<double, kArmJoints> clamped = targets;
-  check_limits(clamped);
+  if (!check_limits(clamped)) {
+    std::fprintf(stderr,
+      "[miraculous_arm] set_targets_rad: non-finite or out-of-limit target rejected\n");
+    return false;
+  }
   if (!initialized_ || !csp_active_.load(std::memory_order_acquire)) {
     return false;
   }
@@ -1025,6 +1058,8 @@ bool MiraculousArm::refresh_feedback_locked(bool send_sync, int feedback_timeout
       cached_vel_rad_[i] = refreshed_vel[i];
     }
     cache_valid_ = true;
+    ++cache_sequence_;
+    cache_stamp_ = std::chrono::steady_clock::now();
   }
   return ok;
 }
@@ -1038,6 +1073,10 @@ bool MiraculousArm::check_limits(std::array<double, kArmJoints> & targets) const
     const size_t i = joint.joint_index;
     const double lo = joint.position_min;
     const double hi = joint.position_max;
+    if (!std::isfinite(targets[i])) {
+      within = false;
+      continue;
+    }
     if (hi > lo) {  // only clamp when limits are configured
       if (targets[i] < lo) {
         targets[i] = lo;
@@ -1195,6 +1234,8 @@ void MiraculousArm::read_loop()
           cached_vel_rad_[i] = static_cast<double>(joint_vel_rad_s[i]);
         }
         cache_valid_ = true;
+        ++cache_sequence_;
+        cache_stamp_ = clock::now();
       } else {
         if (read_fail_streak >= kReadFailWarnStreak &&
           ((read_fail_streak - kReadFailWarnStreak) % 500) == 0)

@@ -1,11 +1,14 @@
 #include "miraculous_driver/miraculous_system.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "pluginlib/class_list_macros.hpp"
@@ -15,47 +18,69 @@ namespace miraculous_driver
 
 namespace
 {
-constexpr double kSeedWaitSec = 0.25;  // wait for the read thread cache on configure
+constexpr double kSeedWaitSec = 0.25;
+
+std::string trim(const std::string & input)
+{
+  const auto first = std::find_if_not(
+    input.begin(), input.end(),
+    [](unsigned char ch) {return std::isspace(ch) != 0;});
+  const auto last = std::find_if_not(
+    input.rbegin(), input.rend(),
+    [](unsigned char ch) {return std::isspace(ch) != 0;}).base();
+  return first < last ? std::string(first, last) : std::string();
+}
+
+template<typename T, typename Parse>
+T parse_scalar_strict(const std::string & text, const std::string & name, Parse parse)
+{
+  const std::string value = trim(text);
+  if (value.empty()) {
+    throw std::invalid_argument(name + " must not be empty");
+  }
+  size_t consumed = 0;
+  T result = parse(value, &consumed);
+  if (consumed != value.size()) {
+    throw std::invalid_argument(name + " contains trailing characters: " + value);
+  }
+  return result;
+}
 
 std::vector<int> default_joint_indices(size_t size)
 {
-  std::vector<int> out;
-  out.reserve(size);
-  for (size_t i = 0; i < size; ++i) {
-    out.push_back(static_cast<int>(i));
+  std::vector<int> result;
+  result.reserve(size);
+  for (size_t index = 0; index < size; ++index) {
+    result.push_back(static_cast<int>(index));
   }
-  return out;
+  return result;
 }
 
-bool validate_joint_indices(const std::vector<int> & indices, size_t max_size)
-{
-  std::vector<bool> seen(max_size, false);
-  for (const int index : indices) {
-    if (index < 0 || static_cast<size_t>(index) >= max_size || seen[static_cast<size_t>(index)]) {
-      return false;
-    }
-    seen[static_cast<size_t>(index)] = true;
-  }
-  return true;
-}
-
-bool validate_limit_values(
+bool validate_limit_vector_size(
   const std::vector<double> & values, size_t active_count, size_t all_count)
 {
-  return values.size() == 1 || values.size() == active_count || values.size() == all_count;
+  return values.size() == 1 || values.size() == active_count ||
+         values.size() == all_count;
 }
 
-double limit_value_for_joint(
-  const std::vector<double> & values, size_t active_i, size_t joint_index)
+double limit_for_joint(
+  const std::vector<double> & values, size_t active_index, size_t joint_index)
 {
   if (values.size() == 1) {
     return values.front();
   }
-  if (values.size() == kArmJoints) {
-    return values[joint_index];
-  }
-  return values[active_i];
+  return values.size() == kArmJoints ? values[joint_index] : values[active_index];
 }
+}  // namespace
+
+MiraculousSystem::MiraculousSystem()
+: MiraculousSystem([]() {return std::make_unique<MiraculousArm>();})
+{
+}
+
+MiraculousSystem::MiraculousSystem(ArmFactory arm_factory)
+: arm_factory_(std::move(arm_factory))
+{
 }
 
 hardware_interface::CallbackReturn MiraculousSystem::on_init(
@@ -66,10 +91,25 @@ hardware_interface::CallbackReturn MiraculousSystem::on_init(
   {
     return hardware_interface::CallbackReturn::ERROR;
   }
+  if (info_.joints.size() != kArmJoints) {
+    RCLCPP_FATAL(
+      rclcpp::get_logger("MiraculousSystem"),
+      "The hardware model must expose exactly %zu joints.", kArmJoints);
+    return hardware_interface::CallbackReturn::ERROR;
+  }
 
   joint_names_.clear();
-  joint_names_.reserve(info_.joints.size());
-  for (const auto & joint : info_.joints) {
+  joint_names_.reserve(kArmJoints);
+  for (size_t index = 0; index < info_.joints.size(); ++index) {
+    const auto & joint = info_.joints[index];
+    const std::string expected_name = "J" + std::to_string(index + 1);
+    if (joint.name != expected_name) {
+      RCLCPP_FATAL(
+        rclcpp::get_logger("MiraculousSystem"),
+        "Joint %zu must be named '%s', got '%s'.", index, expected_name.c_str(),
+        joint.name.c_str());
+      return hardware_interface::CallbackReturn::ERROR;
+    }
     if (joint.command_interfaces.size() != 1 ||
       joint.command_interfaces[0].name != hardware_interface::HW_IF_POSITION)
     {
@@ -81,10 +121,14 @@ hardware_interface::CallbackReturn MiraculousSystem::on_init(
     }
     const bool has_position_state = std::any_of(
       joint.state_interfaces.begin(), joint.state_interfaces.end(),
-      [](const auto & interface) { return interface.name == hardware_interface::HW_IF_POSITION; });
+      [](const auto & interface) {
+        return interface.name == hardware_interface::HW_IF_POSITION;
+      });
     const bool has_velocity_state = std::any_of(
       joint.state_interfaces.begin(), joint.state_interfaces.end(),
-      [](const auto & interface) { return interface.name == hardware_interface::HW_IF_VELOCITY; });
+      [](const auto & interface) {
+        return interface.name == hardware_interface::HW_IF_VELOCITY;
+      });
     if (!has_position_state || !has_velocity_state) {
       RCLCPP_FATAL(
         rclcpp::get_logger("MiraculousSystem"),
@@ -95,194 +139,249 @@ hardware_interface::CallbackReturn MiraculousSystem::on_init(
     joint_names_.push_back(joint.name);
   }
 
-  const size_t n = joint_names_.size();
-  position_states_.assign(n, 0.0);
-  velocity_states_.assign(n, 0.0);
-  position_commands_.assign(n, 0.0);
-
-  // Honor initial_value from the URDF state interface so command/state start aligned.
+  position_states_.assign(kArmJoints, 0.0);
+  velocity_states_.assign(kArmJoints, 0.0);
+  position_commands_.assign(kArmJoints, 0.0);
   for (size_t index = 0; index < info_.joints.size(); ++index) {
     for (const auto & interface : info_.joints[index].state_interfaces) {
-      if (interface.name != hardware_interface::HW_IF_POSITION) {
+      if (interface.name != hardware_interface::HW_IF_POSITION ||
+        interface.initial_value.empty())
+      {
         continue;
       }
-      if (!interface.initial_value.empty()) {
-        try {
-          position_states_[index] = std::stod(interface.initial_value);
-          position_commands_[index] = position_states_[index];
-        } catch (const std::exception &) {
-          RCLCPP_WARN(
-            rclcpp::get_logger("MiraculousSystem"),
-            "Ignoring invalid initial_value '%s' for joint '%s'.",
-            interface.initial_value.c_str(), info_.joints[index].name.c_str());
+      try {
+        const double value = parse_scalar_strict<double>(
+          interface.initial_value, "initial_value",
+          [](const std::string & input, size_t * consumed) {
+            return std::stod(input, consumed);
+          });
+        if (!std::isfinite(value)) {
+          throw std::invalid_argument("initial_value must be finite");
         }
+        position_states_[index] = value;
+        position_commands_[index] = value;
+      } catch (const std::exception & error) {
+        RCLCPP_FATAL(
+          rclcpp::get_logger("MiraculousSystem"),
+          "Invalid initial_value for joint '%s': %s",
+          info_.joints[index].name.c_str(), error.what());
+        return hardware_interface::CallbackReturn::ERROR;
       }
     }
   }
-
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn MiraculousSystem::on_configure(
   const rclcpp_lifecycle::State &)
 {
+  if (fault_latched_) {
+    RCLCPP_FATAL(
+      rclcpp::get_logger("MiraculousSystem"),
+      "A hardware fault is latched. Restart controller_manager after external "
+      "drive reset; in-process reconfiguration is intentionally blocked.");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   ArmConfig config;
-  config.can_interface = parse_string_param("can_interface", "can0");
-  config.baudrate = static_cast<CiaBaudrate_t>(parse_int_param("baudrate", 1000));
-  config.sync_period_us = static_cast<uint32_t>(parse_int_param("sync_period_us", 0));
-  config.read_rate_hz = parse_double_param("read_rate_hz", 100.0);
-  config.state_poll_rate_hz = parse_double_param("state_poll_rate_hz", 0.0);
-  const int encoder_bw = parse_int_param("encoder_bw", 19);
-  config.reduction_ratio = parse_double_param("reduction_ratio", 100.0);
-  if (encoder_bw < 1 || encoder_bw > 31 || config.reduction_ratio <= 0.0) {
-    RCLCPP_FATAL(
-      rclcpp::get_logger("MiraculousSystem"),
-      "encoder_bw must be 1..31 and reduction_ratio > 0 (got %d, %.3f).",
-      encoder_bw, config.reduction_ratio);
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-  config.encoder_bw = static_cast<uint8_t>(encoder_bw);
-  const std::string emcy_str = parse_string_param("enable_emcy_monitor", "true");
-  config.enable_emcy_monitor = !(emcy_str == "false" || emcy_str == "0");
+  try {
+    config.can_interface = parse_string_param("can_interface", "can0");
+    const int baudrate = parse_int_param("baudrate", 1000);
+    const int sync_period_us = parse_int_param("sync_period_us", 0);
+    const int encoder_bw = parse_int_param("encoder_bw", 19);
+    const int manual_timeout = parse_int_param("manual_feedback_timeout_ms", 5);
+    const int stale_timeout = parse_int_param("feedback_stale_timeout_ms", 30);
+    config.read_rate_hz = parse_double_param("read_rate_hz", 100.0);
+    config.state_poll_rate_hz = parse_double_param("state_poll_rate_hz", 0.0);
+    config.reduction_ratio = parse_double_param("reduction_ratio", 100.0);
+    config.enable_emcy_monitor = parse_bool_param("enable_emcy_monitor", true);
+    const bool require_full_arm = parse_bool_param("require_full_arm", false);
+    const bool require_limits = parse_bool_param("require_position_limits", false);
 
-  const std::vector<int> default_node_ids = {1, 2, 3, 4, 5, 6};
-  const std::vector<int> node_ids =
-    parse_int_list_param("node_ids", default_node_ids);
-  const std::vector<int> joint_indices = parse_int_list_param(
-    "joint_indices", default_joint_indices(node_ids.size()));
-
-  std::vector<double> position_min =
-    parse_double_list_param("position_min", std::vector<double>(joint_names_.size(), 0.0));
-  std::vector<double> position_max =
-    parse_double_list_param("position_max", std::vector<double>(joint_names_.size(), 0.0));
-
-  if (node_ids.empty() || node_ids.size() > joint_names_.size()) {
-    RCLCPP_FATAL(
-      rclcpp::get_logger("MiraculousSystem"),
-      "node_ids must contain 1..%zu values.", joint_names_.size());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-  if (joint_indices.size() != node_ids.size() ||
-    !validate_joint_indices(joint_indices, joint_names_.size()))
-  {
-    RCLCPP_FATAL(
-      rclcpp::get_logger("MiraculousSystem"),
-      "joint_indices must contain %zu unique values in range 0..%zu.",
-      node_ids.size(), joint_names_.size() - 1);
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-  if (!validate_limit_values(position_min, node_ids.size(), joint_names_.size()) ||
-    !validate_limit_values(position_max, node_ids.size(), joint_names_.size()))
-  {
-    RCLCPP_FATAL(
-      rclcpp::get_logger("MiraculousSystem"),
-      "position_min and position_max must each contain 1, %zu, or %zu comma-separated values.",
-      node_ids.size(), joint_names_.size());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-  for (size_t i = 0; i < node_ids.size(); ++i) {
-    const size_t joint_index = static_cast<size_t>(joint_indices[i]);
-    JointConfig jc;
-    jc.name = joint_names_[joint_index];
-    jc.joint_index = joint_index;
-    jc.node_id = static_cast<uint8_t>(node_ids[i]);
-    jc.position_min = limit_value_for_joint(position_min, i, joint_index);
-    jc.position_max = limit_value_for_joint(position_max, i, joint_index);
-    config.joints.push_back(jc);
-  }
-
-  arm_ = std::make_unique<MiraculousArm>();
-  if (!arm_->init(config)) {
-    RCLCPP_FATAL(rclcpp::get_logger("MiraculousSystem"), "Failed to open motors.");
-    arm_.reset();
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
-  arm_->set_emcy_callback([](uint8_t node_id, uint16_t error_code, uint8_t error_reg) {
-      RCLCPP_ERROR(
-        rclcpp::get_logger("MiraculousSystem"),
-        "EMCY from node %u: code=0x%04X reg=0x%02X", node_id, error_code, error_reg);
-    });
-
-  // Wait briefly for the background read thread to populate the encoder cache,
-  // then seed commands from the real positions to avoid a jump on activate.
-  const auto deadline = std::chrono::steady_clock::now() +
-    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-      std::chrono::duration<double>(kSeedWaitSec));
-  std::array<double, kArmJoints> pos{};
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (arm_->get_positions_rad(pos)) {
-      break;
+    if (baudrate <= 0 || sync_period_us < 0 || encoder_bw < 1 || encoder_bw > 31 ||
+      manual_timeout <= 0 || stale_timeout <= manual_timeout ||
+      !std::isfinite(config.read_rate_hz) || config.read_rate_hz <= 0.0 ||
+      !std::isfinite(config.state_poll_rate_hz) || config.state_poll_rate_hz < 0.0 ||
+      !std::isfinite(config.reduction_ratio) || config.reduction_ratio <= 0.0)
+    {
+      throw std::invalid_argument(
+              "invalid hardware rates, timeouts, encoder, baudrate, or reduction ratio");
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-  if (!arm_->get_positions_rad(pos)) {
+    config.baudrate = static_cast<CiaBaudrate_t>(baudrate);
+    config.sync_period_us = static_cast<uint32_t>(sync_period_us);
+    config.encoder_bw = static_cast<uint8_t>(encoder_bw);
+    config.manual_feedback_timeout_ms = static_cast<uint32_t>(manual_timeout);
+    feedback_stale_timeout_ = std::chrono::milliseconds(stale_timeout);
+
+    const std::vector<int> node_ids = parse_int_list_param(
+      "node_ids", {1, 2, 3, 4, 5, 6});
+    const std::vector<int> joint_indices = parse_int_list_param(
+      "joint_indices", default_joint_indices(node_ids.size()));
+    const std::vector<double> position_min = parse_double_list_param(
+      "position_min", std::vector<double>(kArmJoints, 0.0));
+    const std::vector<double> position_max = parse_double_list_param(
+      "position_max", std::vector<double>(kArmJoints, 0.0));
+
+    if (node_ids.empty() || node_ids.size() > kArmJoints ||
+      joint_indices.size() != node_ids.size() ||
+      !validate_limit_vector_size(position_min, node_ids.size(), kArmJoints) ||
+      !validate_limit_vector_size(position_max, node_ids.size(), kArmJoints))
+    {
+      throw std::invalid_argument("node, index, or limit list has the wrong length");
+    }
+    std::set<int> unique_nodes;
+    std::set<int> unique_indices;
+    for (size_t active_index = 0; active_index < node_ids.size(); ++active_index) {
+      const int node_id = node_ids[active_index];
+      const int joint_index = joint_indices[active_index];
+      if (node_id < 1 || node_id > 127 || joint_index < 0 ||
+        joint_index >= static_cast<int>(kArmJoints) ||
+        !unique_nodes.insert(node_id).second ||
+        !unique_indices.insert(joint_index).second)
+      {
+        throw std::invalid_argument("node_ids and joint_indices must be unique and in range");
+      }
+    }
+    if (require_full_arm &&
+      (node_ids.size() != kArmJoints ||
+      unique_indices != std::set<int>({0, 1, 2, 3, 4, 5})))
+    {
+      throw std::invalid_argument(
+              "require_full_arm=true requires one mapping for each of J1..J6");
+    }
+
+    configured_joints_.fill(false);
+    position_min_.fill(0.0);
+    position_max_.fill(0.0);
+    for (size_t active_index = 0; active_index < node_ids.size(); ++active_index) {
+      const size_t joint_index = static_cast<size_t>(joint_indices[active_index]);
+      const double lower = limit_for_joint(position_min, active_index, joint_index);
+      const double upper = limit_for_joint(position_max, active_index, joint_index);
+      if (!std::isfinite(lower) || !std::isfinite(upper) ||
+        (require_limits && lower >= upper))
+      {
+        throw std::invalid_argument(
+                "position limits must be finite and strictly ordered when required");
+      }
+      JointConfig joint;
+      joint.name = joint_names_[joint_index];
+      joint.joint_index = joint_index;
+      joint.node_id = static_cast<uint8_t>(node_ids[active_index]);
+      joint.position_min = lower;
+      joint.position_max = upper;
+      config.joints.push_back(joint);
+      configured_joints_[joint_index] = true;
+      position_min_[joint_index] = lower;
+      position_max_[joint_index] = upper;
+    }
+
+    if (!arm_factory_) {
+      throw std::runtime_error("arm factory is empty");
+    }
+    arm_ = arm_factory_();
+    if (!arm_ || !arm_->init(config)) {
+      shutdown_arm();
+      throw std::runtime_error("failed to initialize motors");
+    }
+    emcy_latched_.store(false, std::memory_order_release);
+    arm_->set_emcy_callback(
+      [this](uint8_t node_id, uint16_t error_code, uint8_t error_reg) {
+        emcy_latched_.store(true, std::memory_order_release);
+        RCLCPP_ERROR(
+          rclcpp::get_logger("MiraculousSystem"),
+          "EMCY latched from node %u: code=0x%04X reg=0x%02X",
+          node_id, error_code, error_reg);
+      });
+
+    FeedbackSnapshot snapshot;
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(kSeedWaitSec));
+    while (std::chrono::steady_clock::now() < deadline &&
+      !arm_->get_feedback_snapshot(snapshot))
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    std::string unsafe_reason;
+    if (!arm_->get_feedback_snapshot(snapshot) ||
+      !snapshot_is_safe(snapshot, true, unsafe_reason))
+    {
+      shutdown_arm();
+      throw std::runtime_error(
+              "safe encoder seed unavailable: " +
+              (unsafe_reason.empty() ? std::string("no complete feedback") : unsafe_reason));
+    }
+    apply_snapshot(snapshot);
+    stop_issued_ = false;
+    active_ = false;
+
+    RCLCPP_INFO(
+      rclcpp::get_logger("MiraculousSystem"),
+      "Configured inactive: can=%s mapped_joints=%zu stale_timeout_ms=%d. "
+      "No drive was enabled.",
+      config.can_interface.c_str(), config.joints.size(), stale_timeout);
+    return hardware_interface::CallbackReturn::SUCCESS;
+  } catch (const std::exception & error) {
     RCLCPP_FATAL(
       rclcpp::get_logger("MiraculousSystem"),
-      "No encoder feedback within %.2f s; refusing to configure so stale "
-      "commands can never be sent to the arm.", kSeedWaitSec);
-    arm_.reset();
+      "Configuration rejected: %s", error.what());
+    shutdown_arm();
     return hardware_interface::CallbackReturn::ERROR;
   }
-  const size_t n = joint_names_.size();
-  for (size_t i = 0; i < n && i < kArmJoints; ++i) {
-    position_states_[i] = pos[i];
-    position_commands_[i] = pos[i];
-  }
-  RCLCPP_INFO(
-    rclcpp::get_logger("MiraculousSystem"),
-    "Seeded initial positions from encoders.");
-
-  RCLCPP_INFO(
-    rclcpp::get_logger("MiraculousSystem"),
-    "Configured: can=%s active_joints=%zu total_joints=%zu sync_period_us=%u "
-    "read_rate_hz=%.1f state_poll_rate_hz=%.1f",
-    config.can_interface.c_str(), config.joints.size(), joint_names_.size(),
-    config.sync_period_us, config.read_rate_hz, config.state_poll_rate_hz);
-
-  return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn MiraculousSystem::on_activate(
   const rclcpp_lifecycle::State &)
 {
-  if (!arm_) {
-    RCLCPP_FATAL(rclcpp::get_logger("MiraculousSystem"), "on_activate called before on_configure.");
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-  if (!arm_->enable_csp()) {
-    RCLCPP_FATAL(rclcpp::get_logger("MiraculousSystem"), "enable_csp failed.");
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-  // Re-seed commands from the encoders: the arm may have moved (or sagged)
-  // while disabled between configure and activate, and the first write() must
-  // command the pose the arm is actually in.
-  std::array<double, kArmJoints> pos{};
-  if (!arm_->get_positions_rad(pos)) {
+  if (!arm_ || fault_latched_ || emcy_latched_.load(std::memory_order_acquire)) {
     RCLCPP_FATAL(
       rclcpp::get_logger("MiraculousSystem"),
-      "Cannot read joint positions after enable; refusing to activate.");
-    arm_->disable();
+      "Activation rejected: hardware is missing or a fault is latched.");
     return hardware_interface::CallbackReturn::ERROR;
   }
-  for (size_t i = 0; i < joint_names_.size() && i < kArmJoints; ++i) {
-    position_states_[i] = pos[i];
-    position_commands_[i] = pos[i];
-  }
-  active_ = true;
 
-  RCLCPP_INFO(rclcpp::get_logger("MiraculousSystem"), "Activated (CSP enabled).");
+  FeedbackSnapshot before_enable;
+  std::string unsafe_reason;
+  if (!arm_->get_feedback_snapshot(before_enable) ||
+    !snapshot_is_safe(before_enable, true, unsafe_reason))
+  {
+    RCLCPP_FATAL(
+      rclcpp::get_logger("MiraculousSystem"),
+      "Activation rejected before enable: %s", unsafe_reason.c_str());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  apply_snapshot(before_enable);
+
+  if (!arm_->enable_csp()) {
+    fail_safe_stop("enable_csp transaction failed");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  FeedbackSnapshot after_enable;
+  if (!arm_->get_feedback_snapshot(after_enable) ||
+    !snapshot_is_safe(after_enable, true, unsafe_reason))
+  {
+    fail_safe_stop("unsafe feedback after enable: " + unsafe_reason);
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  apply_snapshot(after_enable);
+  active_ = true;
+  RCLCPP_INFO(
+    rclcpp::get_logger("MiraculousSystem"),
+    "Activated in CSP with commands seeded from fresh encoder feedback.");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn MiraculousSystem::on_deactivate(
   const rclcpp_lifecycle::State &)
 {
+  const bool was_active = active_;
   active_ = false;
-  if (arm_) {
-    arm_->disable();
+  if (arm_ && was_active && !arm_->disable()) {
+    fail_safe_stop("drive disable failed");
+    return hardware_interface::CallbackReturn::ERROR;
   }
-  RCLCPP_INFO(rclcpp::get_logger("MiraculousSystem"), "Deactivated (motors disabled).");
+  RCLCPP_INFO(rclcpp::get_logger("MiraculousSystem"), "Deactivated.");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -290,30 +389,54 @@ hardware_interface::CallbackReturn MiraculousSystem::on_cleanup(
   const rclcpp_lifecycle::State &)
 {
   active_ = false;
-  if (arm_) {
-    arm_->shutdown();
-    arm_.reset();
-  }
+  shutdown_arm();
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
-std::vector<hardware_interface::StateInterface> MiraculousSystem::export_state_interfaces()
+hardware_interface::CallbackReturn MiraculousSystem::on_shutdown(
+  const rclcpp_lifecycle::State &)
+{
+  if (active_ && arm_ && !stop_issued_) {
+    arm_->quick_stop();
+  }
+  active_ = false;
+  shutdown_arm();
+  return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+hardware_interface::CallbackReturn MiraculousSystem::on_error(
+  const rclcpp_lifecycle::State &)
+{
+  fail_safe_stop("ros2_control entered the hardware error transition");
+  shutdown_arm();
+  return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+std::vector<hardware_interface::StateInterface>
+MiraculousSystem::export_state_interfaces()
 {
   std::vector<hardware_interface::StateInterface> interfaces;
   interfaces.reserve(joint_names_.size() * 2);
-  for (size_t i = 0; i < joint_names_.size(); ++i) {
-    interfaces.emplace_back(joint_names_[i], hardware_interface::HW_IF_POSITION, &position_states_[i]);
-    interfaces.emplace_back(joint_names_[i], hardware_interface::HW_IF_VELOCITY, &velocity_states_[i]);
+  for (size_t index = 0; index < joint_names_.size(); ++index) {
+    interfaces.emplace_back(
+      joint_names_[index], hardware_interface::HW_IF_POSITION,
+      &position_states_[index]);
+    interfaces.emplace_back(
+      joint_names_[index], hardware_interface::HW_IF_VELOCITY,
+      &velocity_states_[index]);
   }
   return interfaces;
 }
 
-std::vector<hardware_interface::CommandInterface> MiraculousSystem::export_command_interfaces()
+std::vector<hardware_interface::CommandInterface>
+MiraculousSystem::export_command_interfaces()
 {
   std::vector<hardware_interface::CommandInterface> interfaces;
   interfaces.reserve(joint_names_.size());
-  for (size_t i = 0; i < joint_names_.size(); ++i) {
-    interfaces.emplace_back(joint_names_[i], hardware_interface::HW_IF_POSITION, &position_commands_[i]);
+  for (size_t index = 0; index < joint_names_.size(); ++index) {
+    interfaces.emplace_back(
+      joint_names_[index], hardware_interface::HW_IF_POSITION,
+      &position_commands_[index]);
   }
   return interfaces;
 }
@@ -322,21 +445,26 @@ hardware_interface::return_type MiraculousSystem::read(
   const rclcpp::Time &, const rclcpp::Duration &)
 {
   if (!arm_) {
+    return active_ ? hardware_interface::return_type::ERROR :
+           hardware_interface::return_type::OK;
+  }
+  if (emcy_latched_.load(std::memory_order_acquire) || arm_->has_fault()) {
+    fail_safe_stop("motor fault or EMCY detected");
+    return hardware_interface::return_type::ERROR;
+  }
+
+  FeedbackSnapshot snapshot;
+  std::string unsafe_reason;
+  if (!arm_->get_feedback_snapshot(snapshot) ||
+    !snapshot_is_safe(snapshot, active_, unsafe_reason))
+  {
+    if (active_) {
+      fail_safe_stop("feedback rejected: " + unsafe_reason);
+      return hardware_interface::return_type::ERROR;
+    }
     return hardware_interface::return_type::OK;
   }
-  std::array<double, kArmJoints> pos{};
-  std::array<double, kArmJoints> vel{};
-  if (arm_->get_positions_rad(pos) && arm_->get_velocities_rad(vel)) {
-    for (size_t i = 0; i < joint_names_.size() && i < kArmJoints; ++i) {
-      position_states_[i] = pos[i];
-      velocity_states_[i] = vel[i];
-    }
-  }
-  if (arm_->has_fault()) {
-    RCLCPP_ERROR(
-      rclcpp::get_logger("MiraculousSystem"),
-      "Motor fault detected. Use fault_reset before reactivating.");
-  }
+  apply_snapshot(snapshot);
   return hardware_interface::return_type::OK;
 }
 
@@ -346,90 +474,227 @@ hardware_interface::return_type MiraculousSystem::write(
   if (!active_ || !arm_) {
     return hardware_interface::return_type::OK;
   }
-  std::array<double, kArmJoints> targets{};
-  for (size_t i = 0; i < joint_names_.size() && i < kArmJoints; ++i) {
-    targets[i] = position_commands_[i];
+  if (emcy_latched_.load(std::memory_order_acquire) || arm_->has_fault()) {
+    fail_safe_stop("fault detected before command write");
+    return hardware_interface::return_type::ERROR;
   }
-  arm_->set_targets_rad(targets);
+
+  std::array<double, kArmJoints> targets{};
+  for (size_t index = 0; index < kArmJoints; ++index) {
+    if (!std::isfinite(position_commands_[index])) {
+      fail_safe_stop("non-finite position command for " + joint_names_[index]);
+      return hardware_interface::return_type::ERROR;
+    }
+    if (configured_joints_[index] &&
+      position_max_[index] > position_min_[index] &&
+      (position_commands_[index] < position_min_[index] ||
+      position_commands_[index] > position_max_[index]))
+    {
+      fail_safe_stop("out-of-limit position command for " + joint_names_[index]);
+      return hardware_interface::return_type::ERROR;
+    }
+    targets[index] = position_commands_[index];
+  }
+  if (!arm_->set_targets_rad(targets)) {
+    fail_safe_stop("target write or fresh-feedback transaction failed");
+    return hardware_interface::return_type::ERROR;
+  }
   return hardware_interface::return_type::OK;
 }
 
-// ============================ parameter helpers ===========================
+bool MiraculousSystem::snapshot_is_safe(
+  const FeedbackSnapshot & snapshot, bool require_fresh,
+  std::string & reason) const
+{
+  if (snapshot.sequence == 0) {
+    reason = "feedback sequence is zero";
+    return false;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (snapshot.stamp.time_since_epoch().count() <= 0 || snapshot.stamp > now) {
+    reason = "feedback timestamp is invalid";
+    return false;
+  }
+  if (require_fresh && now - snapshot.stamp > feedback_stale_timeout_) {
+    reason = "feedback exceeded stale watchdog";
+    return false;
+  }
+  for (size_t index = 0; index < kArmJoints; ++index) {
+    if (!configured_joints_[index]) {
+      continue;
+    }
+    if (!std::isfinite(snapshot.positions_rad[index]) ||
+      !std::isfinite(snapshot.velocities_rad_s[index]))
+    {
+      reason = "non-finite feedback for " + joint_names_[index];
+      return false;
+    }
+    if (position_max_[index] > position_min_[index] &&
+      (snapshot.positions_rad[index] < position_min_[index] ||
+      snapshot.positions_rad[index] > position_max_[index]))
+    {
+      reason = "feedback outside configured position limits for " + joint_names_[index];
+      return false;
+    }
+  }
+  return true;
+}
 
-double MiraculousSystem::parse_double_param(const std::string & name, double default_value) const
+void MiraculousSystem::apply_snapshot(const FeedbackSnapshot & snapshot)
+{
+  for (size_t index = 0; index < kArmJoints; ++index) {
+    if (!configured_joints_[index]) {
+      continue;
+    }
+    position_states_[index] = snapshot.positions_rad[index];
+    velocity_states_[index] = snapshot.velocities_rad_s[index];
+    position_commands_[index] = snapshot.positions_rad[index];
+  }
+}
+
+void MiraculousSystem::fail_safe_stop(const std::string & reason)
+{
+  active_ = false;
+  fault_latched_ = true;
+  if (!stop_issued_) {
+    stop_issued_ = true;
+    const bool stopped = arm_ && arm_->quick_stop();
+    RCLCPP_ERROR(
+      rclcpp::get_logger("MiraculousSystem"),
+      "FAULT LATCHED: %s. Quick-stop command result: %s. External drive reset "
+      "and controller_manager restart are required.",
+      reason.c_str(), stopped ? "success" : "failure");
+  }
+}
+
+void MiraculousSystem::shutdown_arm()
+{
+  if (arm_) {
+    arm_->set_emcy_callback({});
+    arm_->shutdown();
+    arm_.reset();
+  }
+}
+
+double MiraculousSystem::parse_double_param(
+  const std::string & name, double default_value) const
 {
   const auto it = info_.hardware_parameters.find(name);
   if (it == info_.hardware_parameters.end()) {
     return default_value;
   }
-  try {
-    return std::stod(it->second);
-  } catch (const std::exception &) {
-    return default_value;
+  const double value = parse_scalar_strict<double>(
+    it->second, name,
+    [](const std::string & input, size_t * consumed) {
+      return std::stod(input, consumed);
+    });
+  if (!std::isfinite(value)) {
+    throw std::invalid_argument(name + " must be finite");
   }
+  return value;
 }
 
 std::string MiraculousSystem::parse_string_param(
   const std::string & name, const std::string & default_value) const
 {
   const auto it = info_.hardware_parameters.find(name);
-  if (it == info_.hardware_parameters.end() || it->second.empty()) {
+  if (it == info_.hardware_parameters.end()) {
     return default_value;
   }
-  return it->second;
+  const std::string value = trim(it->second);
+  if (value.empty() || value.find(',') != std::string::npos ||
+    std::any_of(
+      value.begin(), value.end(),
+      [](unsigned char character) {return std::isspace(character) != 0;}))
+  {
+    throw std::invalid_argument(
+            name + " must be non-empty and contain no whitespace or comma");
+  }
+  return value;
 }
 
-int MiraculousSystem::parse_int_param(const std::string & name, int default_value) const
+int MiraculousSystem::parse_int_param(
+  const std::string & name, int default_value) const
 {
   const auto it = info_.hardware_parameters.find(name);
   if (it == info_.hardware_parameters.end()) {
     return default_value;
   }
-  try {
-    return std::stoi(it->second);
-  } catch (const std::exception &) {
+  return parse_scalar_strict<int>(
+    it->second, name,
+    [](const std::string & input, size_t * consumed) {
+      return std::stoi(input, consumed);
+    });
+}
+
+bool MiraculousSystem::parse_bool_param(
+  const std::string & name, bool default_value) const
+{
+  const auto it = info_.hardware_parameters.find(name);
+  if (it == info_.hardware_parameters.end()) {
     return default_value;
   }
+  std::string value = trim(it->second);
+  std::transform(
+    value.begin(), value.end(), value.begin(),
+    [](unsigned char character) {return static_cast<char>(std::tolower(character));});
+  if (value == "true" || value == "1") {
+    return true;
+  }
+  if (value == "false" || value == "0") {
+    return false;
+  }
+  throw std::invalid_argument(name + " must be true, false, 1, or 0");
 }
 
 std::vector<int> MiraculousSystem::parse_int_list_param(
   const std::string & name, const std::vector<int> & default_value) const
 {
   const auto it = info_.hardware_parameters.find(name);
-  if (it == info_.hardware_parameters.end() || it->second.empty()) {
+  if (it == info_.hardware_parameters.end()) {
     return default_value;
   }
   std::vector<int> result;
-  std::stringstream ss(it->second);
+  std::stringstream stream(it->second);
   std::string token;
-  while (std::getline(ss, token, ',')) {
-    try {
-      result.push_back(std::stoi(token));
-    } catch (const std::exception &) {
-      // skip malformed token
-    }
+  while (std::getline(stream, token, ',')) {
+    result.push_back(parse_scalar_strict<int>(
+        token, name,
+        [](const std::string & input, size_t * consumed) {
+          return std::stoi(input, consumed);
+        }));
   }
-  return result.empty() ? default_value : result;
+  if (result.empty() || (!it->second.empty() && it->second.back() == ',')) {
+    throw std::invalid_argument(name + " contains an empty list item");
+  }
+  return result;
 }
 
 std::vector<double> MiraculousSystem::parse_double_list_param(
   const std::string & name, const std::vector<double> & default_value) const
 {
   const auto it = info_.hardware_parameters.find(name);
-  if (it == info_.hardware_parameters.end() || it->second.empty()) {
+  if (it == info_.hardware_parameters.end()) {
     return default_value;
   }
   std::vector<double> result;
-  std::stringstream ss(it->second);
+  std::stringstream stream(it->second);
   std::string token;
-  while (std::getline(ss, token, ',')) {
-    try {
-      result.push_back(std::stod(token));
-    } catch (const std::exception &) {
-      // skip malformed token
+  while (std::getline(stream, token, ',')) {
+    const double value = parse_scalar_strict<double>(
+      token, name,
+      [](const std::string & input, size_t * consumed) {
+        return std::stod(input, consumed);
+      });
+    if (!std::isfinite(value)) {
+      throw std::invalid_argument(name + " must contain only finite values");
     }
+    result.push_back(value);
   }
-  return result.empty() ? default_value : result;
+  if (result.empty() || (!it->second.empty() && it->second.back() == ',')) {
+    throw std::invalid_argument(name + " contains an empty list item");
+  }
+  return result;
 }
 
 }  // namespace miraculous_driver

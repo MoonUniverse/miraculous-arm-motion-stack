@@ -6,8 +6,14 @@ find_package(ament_index_cpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
-foreach(target plan_to_joint_target plan_to_pose_target plan_cartesian_path execute_named_pose)
+foreach(target
+    plan_to_joint_target
+    plan_to_pose_target
+    plan_cartesian_path
+    execute_named_pose
+    moveit_joint_smoke_test)
   add_executable(${target} src/${target}.cpp)
   target_include_directories(${target} PRIVATE include)
   ament_target_dependencies(${target}
@@ -15,6 +21,7 @@ foreach(target plan_to_joint_target plan_to_pose_target plan_cartesian_path exec
     geometry_msgs
     moveit_ros_planning_interface
     rclcpp
+    sensor_msgs
   )
   install(TARGETS ${target}
     RUNTIME DESTINATION lib/${PROJECT_NAME}

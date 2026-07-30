@@ -69,6 +69,15 @@ struct FeedbackSample
   std::array<double, kArmJoints> velocities_rad_s{};
 };
 
+/// Latest complete feedback cache, including a monotonic freshness marker.
+struct FeedbackSnapshot
+{
+  uint64_t sequence = 0;
+  std::chrono::steady_clock::time_point stamp;
+  std::array<double, kArmJoints> positions_rad{};
+  std::array<double, kArmJoints> velocities_rad_s{};
+};
+
 /**
  * @brief C++ wrapper around miraculous_sdk managing the 6 MiraMotor handles of
  *        the ARM manipulator.
@@ -89,7 +98,7 @@ class MiraculousArm
 {
 public:
   MiraculousArm();
-  ~MiraculousArm();
+  virtual ~MiraculousArm();
 
   MiraculousArm(const MiraculousArm &) = delete;
   MiraculousArm & operator=(const MiraculousArm &) = delete;
@@ -99,7 +108,7 @@ public:
   /// Open motors, bootstrap CANopen, and configure CSP mode/SYNC exactly once
   /// without enabling the power stage. Starts the background read thread.
   /// Returns false on any open or CSP configuration failure.
-  bool init(const ArmConfig & config);
+  virtual bool init(const ArmConfig & config);
 
   /// Passive (teach) mode: open/bootstrap the bus, send Shutdown (controlword
   /// 0x0006), verify Ready to Switch On, and register feedback callbacks.
@@ -107,7 +116,7 @@ public:
   bool init_passive(const ArmConfig & config);
 
   /// Stop the read thread, disable and close all motors. Safe to call once.
-  void shutdown();
+  virtual void shutdown();
 
   bool is_initialized() const { return initialized_; }
   bool is_passive() const { return passive_; }
@@ -119,20 +128,20 @@ public:
   /// position. CSP mode and csp_init are process-lifetime setup done once by
   /// init(); repeated enable/disable cycles never reconfigure them. Fails if the
   /// seed position cannot be read, so success guarantees the arm holds its pose.
-  bool enable_csp();
+  virtual bool enable_csp();
 
   /// Enable all motors (without switching to CSP). Rarely needed directly.
   bool enable();
 
   /// Disable all motors (Operation Enabled -> Switched On).
-  void disable();
+  virtual bool disable();
 
   /// Cut drive voltage (controlword 0x0000) and verify Switch On Disabled.
   /// Primarily used by passive teach mode and its fault handling.
   bool disable_voltage();
 
   /// Quick-stop all motors (emergency deceleration).
-  void quick_stop();
+  virtual bool quick_stop();
 
   /// Fault reset on all motors, then leave them disabled.
   /// @return true if all motors reset successfully.
@@ -142,8 +151,9 @@ public:
 
   bool get_positions_rad(std::array<double, kArmJoints> & positions) const;
   bool get_velocities_rad(std::array<double, kArmJoints> & velocities) const;
+  virtual bool get_feedback_snapshot(FeedbackSnapshot & snapshot) const;
   bool get_states(std::array<Cia402State_t, kArmJoints> & states) const;
-  bool has_fault() const;
+  virtual bool has_fault() const;
 
   /// Verify every configured passive drive is still Ready to Switch On.
   bool is_passive_ready();
@@ -156,10 +166,10 @@ public:
   // ---- CSP writing ---------------------------------------------------------
 
   /// Set joint-side target positions [rad] for configured motors, then send one
-  /// unified SYNC frame in manual SYNC mode. Targets are clamped to joint-side
-  /// limits.
+  /// unified SYNC frame in manual SYNC mode. Non-finite or out-of-limit targets
+  /// are rejected before any motor write.
   /// @return true if all writes succeeded.
-  bool set_targets_rad(const std::array<double, kArmJoints> & targets);
+  virtual bool set_targets_rad(const std::array<double, kArmJoints> & targets);
 
   /// Send a single SYNC frame (CAN id 0x80, len 0) on the shared CAN context.
   void send_sync();
@@ -171,7 +181,7 @@ public:
 
   /// Register an EMCY callback. EMCY frames (CAN id 0x080 + node_id) are
   /// delivered through the SDK's per-bus EMCY dispatcher.
-  void set_emcy_callback(EmcyCallback callback);
+  virtual void set_emcy_callback(EmcyCallback callback);
 
 private:
   enum class CspEnableStage : uint8_t
@@ -235,6 +245,8 @@ private:
   std::array<double, kArmJoints> cached_vel_rad_{};
   std::array<Cia402State_t, kArmJoints> cached_states_{};
   bool cache_valid_{false};
+  uint64_t cache_sequence_{0};
+  std::chrono::steady_clock::time_point cache_stamp_{};
   bool fault_detected_{false};
 
   // TPDO freshness tracking for all driver-owned single-SYNC acquisitions.

@@ -1,0 +1,56 @@
+schema_version: 1
+
+# This file is intentionally not ready for motion.  Measure and review every
+# position limit, replace the null values, then set calibrated: true.
+calibrated: false
+
+hardware:
+  can_interface: can0
+  baudrate: 1000
+  encoder_bw: 19
+  reduction_ratio: 100.0
+  sync_period_us: 0
+  controller_update_rate_hz: 100
+  read_rate_hz: 100.0
+  state_poll_rate_hz: 0.0
+  manual_feedback_timeout_ms: 5
+  feedback_stale_timeout_ms: 30
+  enable_emcy_monitor: true
+
+joints:
+  J1:
+    node_id: 1
+    position_min: null
+    position_max: null
+    max_velocity: 0.05
+    max_acceleration: 0.10
+  J2:
+    node_id: 2
+    position_min: null
+    position_max: null
+    max_velocity: 0.05
+    max_acceleration: 0.10
+  J3:
+    node_id: 3
+    position_min: null
+    position_max: null
+    max_velocity: 0.05
+    max_acceleration: 0.10
+  J4:
+    node_id: 4
+    position_min: null
+    position_max: null
+    max_velocity: 0.05
+    max_acceleration: 0.10
+  J5:
+    node_id: 5
+    position_min: null
+    position_max: null
+    max_velocity: 0.05
+    max_acceleration: 0.10
+  J6:
+    node_id: 6
+    position_min: null
+    position_max: null
+    max_velocity: 0.05
+    max_acceleration: 0.10

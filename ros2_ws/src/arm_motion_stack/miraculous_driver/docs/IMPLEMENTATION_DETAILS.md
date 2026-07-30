@@ -439,6 +439,12 @@ cat install/miraculous_driver/share/miraculous_driver/miraculous_driver_plugins.
 
 ### 7.1 MoveIt + 真实硬件
 
+完整安全流程、profile 标定、人工使能与故障恢复见：
+
+```text
+../../docs/MOVEIT_REAL_BRINGUP.md
+```
+
 ```bash
 source install/setup.bash
 ros2 launch miraculous_driver moveit_real.launch.py
@@ -448,9 +454,12 @@ ros2 launch miraculous_driver moveit_real.launch.py
 - robot_state_publisher (URDF, `hardware_type:=real`)
 - ros2_control_node (MiraculousSystem 插件)
 - joint_state_broadcaster spawner
-- arm_controller spawner
+- arm_controller spawner（仅加载为 inactive，必须人工激活）
 - MoveGroup (MoveIt 规划)
 - RViz (可选, `use_rviz:=false` 关闭)
+
+默认 `real_arm_profile.yaml` 为 `calibrated: false`，因此未填入并审核六轴
+position limits 前，启动会在接触硬件前明确失败。
 
 ### 7.2 仅 ros2_control (无 MoveIt)
 

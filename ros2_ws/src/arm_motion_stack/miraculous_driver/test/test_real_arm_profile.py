@@ -1,0 +1,73 @@
+from pathlib import Path
+
+import pytest
+import yaml
+
+from miraculous_driver.real_arm_profile import JOINT_NAMES, load_real_arm_profile
+
+
+def _valid_profile():
+    return {
+        "schema_version": 1,
+        "calibrated": True,
+        "hardware": {
+            "can_interface": "can0",
+            "baudrate": 1000,
+            "encoder_bw": 19,
+            "reduction_ratio": 100.0,
+            "sync_period_us": 0,
+            "controller_update_rate_hz": 100,
+            "read_rate_hz": 100.0,
+            "state_poll_rate_hz": 0.0,
+            "manual_feedback_timeout_ms": 5,
+            "feedback_stale_timeout_ms": 30,
+            "enable_emcy_monitor": True,
+        },
+        "joints": {
+            name: {
+                "node_id": index,
+                "position_min": -1.0,
+                "position_max": 1.0,
+                "max_velocity": 0.05,
+                "max_acceleration": 0.10,
+            }
+            for index, name in enumerate(JOINT_NAMES, start=1)
+        },
+    }
+
+
+def _write(tmp_path: Path, profile) -> str:
+    path = tmp_path / "profile.yaml"
+    path.write_text(yaml.safe_dump(profile), encoding="utf-8")
+    return str(path)
+
+
+def test_valid_profile_drives_xacro_and_moveit_limits(tmp_path):
+    profile = load_real_arm_profile(_write(tmp_path, _valid_profile()))
+    assert profile.node_ids_csv == "1,2,3,4,5,6"
+    assert profile.joint_indices_csv == "0,1,2,3,4,5"
+    assert profile.position_min_csv == "-1.0,-1.0,-1.0,-1.0,-1.0,-1.0"
+    assert profile.moveit_joint_limits["joint_limits"]["J6"]["max_velocity"] == 0.05
+
+
+def test_production_template_is_rejected_for_real_motion():
+    path = Path(__file__).parents[1] / "config" / "real_arm_profile.yaml"
+    with pytest.raises(ValueError, match="not calibrated"):
+        load_real_arm_profile(str(path))
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda p: p["joints"]["J6"].update(node_id=5), "duplicate"),
+        (lambda p: p["joints"]["J1"].update(position_min=2.0), "less than"),
+        (lambda p: p["joints"]["J2"].update(position_max=2.0), "exceed URDF"),
+        (lambda p: p["hardware"].update(feedback_stale_timeout_ms=5), "greater"),
+        (lambda p: p["hardware"].update(read_rate_hz=float("nan")), "finite"),
+    ],
+)
+def test_invalid_profiles_fail_closed(tmp_path, mutate, message):
+    profile = _valid_profile()
+    mutate(profile)
+    with pytest.raises(ValueError, match=message):
+        load_real_arm_profile(_write(tmp_path, profile))
