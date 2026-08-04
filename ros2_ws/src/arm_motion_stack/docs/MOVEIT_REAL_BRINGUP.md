@@ -112,6 +112,16 @@ URDF lower <= position_min < position_max <= URDF upper
 六轴数值经过第二人复核后，才把 `calibrated` 改为 `true`。不要把示教采样的
 极值直接当作安全限位，也不要用 `0/0` 绕过校验。
 
+`hardware.baudrate: 0` 是受支持的现场配置，表示 SDK 不修改 SocketCAN 接口
+当前波特率；它不表示波特率未知或关闭 CAN。使用该值前必须先确认接口已经按
+电机侧要求配置：
+
+```bash
+ip -details link show can1
+```
+
+负数 baudrate 会在接触硬件前被 profile 和 ros2_control 插件共同拒绝。
+
 安装/重新构建后，可离线验证 profile：
 
 ```bash

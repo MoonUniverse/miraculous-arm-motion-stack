@@ -198,7 +198,7 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
     const bool require_full_arm = parse_bool_param("require_full_arm", false);
     const bool require_limits = parse_bool_param("require_position_limits", false);
 
-    if (baudrate <= 0 || sync_period_us < 0 || encoder_bw < 1 || encoder_bw > 31 ||
+    if (baudrate < 0 || sync_period_us < 0 || encoder_bw < 1 || encoder_bw > 31 ||
       manual_timeout <= 0 || stale_timeout <= manual_timeout ||
       !std::isfinite(config.read_rate_hz) || config.read_rate_hz <= 0.0 ||
       !std::isfinite(config.state_poll_rate_hz) || config.state_poll_rate_hz < 0.0 ||

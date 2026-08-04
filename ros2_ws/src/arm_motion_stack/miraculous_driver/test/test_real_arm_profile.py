@@ -50,6 +50,13 @@ def test_valid_profile_drives_xacro_and_moveit_limits(tmp_path):
     assert profile.moveit_joint_limits["joint_limits"]["J6"]["max_velocity"] == 0.05
 
 
+def test_zero_baudrate_keeps_existing_socketcan_configuration(tmp_path):
+    raw_profile = _valid_profile()
+    raw_profile["hardware"]["baudrate"] = 0
+    profile = load_real_arm_profile(_write(tmp_path, raw_profile))
+    assert profile.baudrate == 0
+
+
 def test_production_template_is_rejected_for_real_motion():
     path = Path(__file__).parents[1] / "config" / "real_arm_profile.yaml"
     with pytest.raises(ValueError, match="not calibrated"):
@@ -62,6 +69,7 @@ def test_production_template_is_rejected_for_real_motion():
         (lambda p: p["joints"]["J6"].update(node_id=5), "duplicate"),
         (lambda p: p["joints"]["J1"].update(position_min=2.0), "less than"),
         (lambda p: p["joints"]["J2"].update(position_max=2.0), "exceed URDF"),
+        (lambda p: p["hardware"].update(baudrate=-1), "non-negative"),
         (lambda p: p["hardware"].update(feedback_stale_timeout_ms=5), "greater"),
         (lambda p: p["hardware"].update(read_rate_hz=float("nan")), "finite"),
     ],

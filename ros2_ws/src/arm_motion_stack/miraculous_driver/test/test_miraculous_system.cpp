@@ -300,6 +300,35 @@ TEST(MiraculousSystemValidationTest, RejectsMalformedListsBeforeOpeningHardware)
   EXPECT_EQ(state->init_calls, 0);
 }
 
+TEST(MiraculousSystemValidationTest, ZeroBaudrateKeepsSocketCanConfiguration)
+{
+  auto state = std::make_shared<FakeState>();
+  MiraculousSystem system(
+    [state]() {return std::make_unique<FakeArm>(state);});
+  auto info = makeHardwareInfo();
+  info.hardware_parameters["baudrate"] = "0";
+  ASSERT_EQ(system.on_init(info), hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_EQ(
+    system.on_configure(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::SUCCESS);
+  ASSERT_EQ(state->init_calls, 1);
+  EXPECT_EQ(static_cast<int>(state->config.baudrate), 0);
+}
+
+TEST(MiraculousSystemValidationTest, RejectsNegativeBaudrateBeforeOpeningHardware)
+{
+  auto state = std::make_shared<FakeState>();
+  MiraculousSystem system(
+    [state]() {return std::make_unique<FakeArm>(state);});
+  auto info = makeHardwareInfo();
+  info.hardware_parameters["baudrate"] = "-1";
+  ASSERT_EQ(system.on_init(info), hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_EQ(
+    system.on_configure(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::ERROR);
+  EXPECT_EQ(state->init_calls, 0);
+}
+
 TEST(MiraculousSystemValidationTest, RejectsUnsafePositionAtConfigure)
 {
   auto state = std::make_shared<FakeState>();

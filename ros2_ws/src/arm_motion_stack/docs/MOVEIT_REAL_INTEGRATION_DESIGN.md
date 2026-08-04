@@ -1,6 +1,6 @@
 # MoveIt 真机接入总体设计与测试基线
 
-更新日期：2026-07-30
+更新日期：2026-08-04
 实现基线：`f298255 Integrate fail-closed MoveIt hardware path`
 
 ## 1. 文档目的
@@ -473,7 +473,7 @@ quick-stop。
 | profile 字段 | ros2_control/driver 用途 |
 |---|---|
 | `can_interface` | SocketCAN interface |
-| `baudrate` | CANopen baudrate |
+| `baudrate` | CANopen baudrate；`0` 表示沿用 SocketCAN 接口当前配置，不要求 SDK 修改波特率 |
 | `encoder_bw` | SDK radian conversion |
 | `reduction_ratio` | load-side velocity conversion |
 | `sync_period_us` | `0` 表示 driver-owned manual SYNC |
@@ -602,6 +602,7 @@ miraculous_driver/test/test_real_arm_profile.py
 验证：
 
 - 合法 profile 能生成 xacro CSV 和 MoveIt limits；
+- `baudrate=0` 被保留并传播到 SDK，负数被拒绝；
 - 生产模板因 `calibrated: false` 被 real-motion loader 拒绝；
 - duplicate node id 被拒绝；
 - `position_min >= position_max` 被拒绝；
@@ -631,6 +632,7 @@ miraculous_driver/test/test_miraculous_system.cpp
 - stale feedback quick-stop；
 - EMCY 在控制周期被观察并 quick-stop；
 - malformed list 在打开硬件前被拒绝；
+- `baudrate=0` 原样传播到 SDK，负数在打开硬件前被拒绝；
 - configure 时 actual position 越限被拒绝；
 - 故障后 cleanup/reconfigure 仍被拒绝。
 
@@ -708,6 +710,12 @@ colcon test-result \
 
 ```text
 36 tests, 0 errors, 0 failures, 0 skipped
+```
+
+2026-08-04 增加 `baudrate=0` 契约回归后，`miraculous_driver` 包级结果：
+
+```text
+40 tests, 0 errors, 0 failures, 0 skipped
 ```
 
 real xacro 还需生成 URDF 并执行：

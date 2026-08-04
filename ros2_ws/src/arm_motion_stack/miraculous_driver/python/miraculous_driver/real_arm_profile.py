@@ -260,8 +260,10 @@ def load_real_arm_profile(
     stale_timeout = _integer(
         hardware["feedback_stale_timeout_ms"], "hardware.feedback_stale_timeout_ms"
     )
-    if baudrate <= 0 or encoder_bw <= 0 or sync_period_us < 0:
-        raise ValueError("baudrate/encoder_bw must be positive and sync_period_us non-negative")
+    if baudrate < 0 or encoder_bw <= 0 or sync_period_us < 0:
+        raise ValueError(
+            "baudrate/sync_period_us must be non-negative and encoder_bw positive"
+        )
     if manual_timeout <= 0 or stale_timeout <= manual_timeout:
         raise ValueError(
             "manual_feedback_timeout_ms must be positive and "
