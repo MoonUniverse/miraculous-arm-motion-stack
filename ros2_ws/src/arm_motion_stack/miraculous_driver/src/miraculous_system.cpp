@@ -185,16 +185,19 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
 
   ArmConfig config;
   try {
-    config.can_interface = parse_string_param("can_interface", "can0");
-    const int baudrate = parse_int_param("baudrate", 1000);
+    config.can_interface = parse_string_param("can_interface", "can1");
+    const int baudrate = parse_int_param("baudrate", 0);
     const int sync_period_us = parse_int_param("sync_period_us", 0);
     const int encoder_bw = parse_int_param("encoder_bw", 19);
-    const int manual_timeout = parse_int_param("manual_feedback_timeout_ms", 5);
+    const int manual_timeout = parse_int_param("manual_feedback_timeout_ms", 15);
     const int stale_timeout = parse_int_param("feedback_stale_timeout_ms", 30);
-    config.read_rate_hz = parse_double_param("read_rate_hz", 100.0);
+    const int following_error_cycles = parse_int_param("following_error_cycles", 0);
+    config.read_rate_hz = parse_double_param("read_rate_hz", 50.0);
     config.state_poll_rate_hz = parse_double_param("state_poll_rate_hz", 0.0);
     config.reduction_ratio = parse_double_param("reduction_ratio", 100.0);
     config.enable_emcy_monitor = parse_bool_param("enable_emcy_monitor", true);
+    max_command_step_rad_ = parse_double_param("max_command_step_rad", 0.0);
+    max_following_error_rad_ = parse_double_param("max_following_error_rad", 0.0);
     const bool require_full_arm = parse_bool_param("require_full_arm", false);
     const bool require_limits = parse_bool_param("require_position_limits", false);
 
@@ -202,15 +205,40 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
       manual_timeout <= 0 || stale_timeout <= manual_timeout ||
       !std::isfinite(config.read_rate_hz) || config.read_rate_hz <= 0.0 ||
       !std::isfinite(config.state_poll_rate_hz) || config.state_poll_rate_hz < 0.0 ||
-      !std::isfinite(config.reduction_ratio) || config.reduction_ratio <= 0.0)
+      !std::isfinite(config.reduction_ratio) || config.reduction_ratio <= 0.0 ||
+      !std::isfinite(max_command_step_rad_) || max_command_step_rad_ < 0.0 ||
+      !std::isfinite(max_following_error_rad_) || max_following_error_rad_ < 0.0 ||
+      following_error_cycles < 0 ||
+      ((max_following_error_rad_ > 0.0) != (following_error_cycles > 0)))
     {
       throw std::invalid_argument(
               "invalid hardware rates, timeouts, encoder, baudrate, or reduction ratio");
     }
+    if (require_full_arm && sync_period_us != 0) {
+      throw std::invalid_argument(
+              "require_full_arm=true requires sync_period_us=0 so six-axis target "
+              "writes remain under one driver-owned Manual SYNC transaction");
+    }
+    if (require_full_arm && !config.enable_emcy_monitor) {
+      throw std::invalid_argument(
+              "require_full_arm=true requires enable_emcy_monitor=true");
+    }
+    if (require_full_arm &&
+      (max_command_step_rad_ <= 0.0 || max_following_error_rad_ <= 0.0 ||
+      following_error_cycles == 0))
+    {
+      throw std::invalid_argument(
+              "require_full_arm=true requires positive command-step and following-error "
+              "watchdogs");
+    }
+    following_error_cycles_ = static_cast<size_t>(following_error_cycles);
     config.baudrate = static_cast<CiaBaudrate_t>(baudrate);
     config.sync_period_us = static_cast<uint32_t>(sync_period_us);
     config.encoder_bw = static_cast<uint8_t>(encoder_bw);
     config.manual_feedback_timeout_ms = static_cast<uint32_t>(manual_timeout);
+    config.max_command_step_rad = max_command_step_rad_;
+    config.max_following_error_rad = max_following_error_rad_;
+    config.following_error_cycles = static_cast<uint32_t>(following_error_cycles);
     feedback_stale_timeout_ = std::chrono::milliseconds(stale_timeout);
 
     const std::vector<int> node_ids = parse_int_list_param(
@@ -312,6 +340,10 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
               (unsafe_reason.empty() ? std::string("no complete feedback") : unsafe_reason));
     }
     apply_snapshot(snapshot);
+    last_sent_commands_ = snapshot.positions_rad;
+    last_command_valid_ = true;
+    following_error_streak_ = 0;
+    last_following_sequence_ = snapshot.sequence;
     stop_issued_ = false;
     active_ = false;
 
@@ -365,6 +397,10 @@ hardware_interface::CallbackReturn MiraculousSystem::on_activate(
     return hardware_interface::CallbackReturn::ERROR;
   }
   apply_snapshot(after_enable);
+  last_sent_commands_ = after_enable.positions_rad;
+  last_command_valid_ = true;
+  following_error_streak_ = 0;
+  last_following_sequence_ = after_enable.sequence;
   active_ = true;
   RCLCPP_INFO(
     rclcpp::get_logger("MiraculousSystem"),
@@ -377,6 +413,8 @@ hardware_interface::CallbackReturn MiraculousSystem::on_deactivate(
 {
   const bool was_active = active_;
   active_ = false;
+  last_command_valid_ = false;
+  following_error_streak_ = 0;
   if (arm_ && was_active && !arm_->disable()) {
     fail_safe_stop("drive disable failed");
     return hardware_interface::CallbackReturn::ERROR;
@@ -464,6 +502,10 @@ hardware_interface::return_type MiraculousSystem::read(
     }
     return hardware_interface::return_type::OK;
   }
+  if (active_ && !following_error_is_safe(snapshot, unsafe_reason)) {
+    fail_safe_stop("feedback rejected: " + unsafe_reason);
+    return hardware_interface::return_type::ERROR;
+  }
   apply_snapshot(snapshot);
   return hardware_interface::return_type::OK;
 }
@@ -493,12 +535,22 @@ hardware_interface::return_type MiraculousSystem::write(
       fail_safe_stop("out-of-limit position command for " + joint_names_[index]);
       return hardware_interface::return_type::ERROR;
     }
+    if (configured_joints_[index] && last_command_valid_ &&
+      max_command_step_rad_ > 0.0 &&
+      std::abs(position_commands_[index] - last_sent_commands_[index]) >
+      max_command_step_rad_)
+    {
+      fail_safe_stop("single-cycle command step exceeded for " + joint_names_[index]);
+      return hardware_interface::return_type::ERROR;
+    }
     targets[index] = position_commands_[index];
   }
   if (!arm_->set_targets_rad(targets)) {
     fail_safe_stop("target write or fresh-feedback transaction failed");
     return hardware_interface::return_type::ERROR;
   }
+  last_sent_commands_ = targets;
+  last_command_valid_ = true;
   return hardware_interface::return_type::OK;
 }
 
@@ -540,6 +592,46 @@ bool MiraculousSystem::snapshot_is_safe(
   return true;
 }
 
+bool MiraculousSystem::following_error_is_safe(
+  const FeedbackSnapshot & snapshot, std::string & reason)
+{
+  if (!last_command_valid_ || max_following_error_rad_ <= 0.0 ||
+    following_error_cycles_ == 0 || snapshot.sequence == last_following_sequence_)
+  {
+    return true;
+  }
+  last_following_sequence_ = snapshot.sequence;
+
+  double worst_error = 0.0;
+  size_t worst_joint = 0;
+  for (size_t index = 0; index < kArmJoints; ++index) {
+    if (!configured_joints_[index]) {
+      continue;
+    }
+    const double error = std::abs(last_sent_commands_[index] - snapshot.positions_rad[index]);
+    if (error > worst_error) {
+      worst_error = error;
+      worst_joint = index;
+    }
+  }
+
+  if (worst_error <= max_following_error_rad_) {
+    following_error_streak_ = 0;
+    return true;
+  }
+  ++following_error_streak_;
+  if (following_error_streak_ < following_error_cycles_) {
+    return true;
+  }
+
+  std::ostringstream message;
+  message << "following error exceeded for " << joint_names_[worst_joint]
+          << ": " << worst_error << " rad > " << max_following_error_rad_
+          << " rad for " << following_error_streak_ << " fresh cycles";
+  reason = message.str();
+  return false;
+}
+
 void MiraculousSystem::apply_snapshot(const FeedbackSnapshot & snapshot)
 {
   for (size_t index = 0; index < kArmJoints; ++index) {
@@ -555,13 +647,14 @@ void MiraculousSystem::apply_snapshot(const FeedbackSnapshot & snapshot)
 void MiraculousSystem::fail_safe_stop(const std::string & reason)
 {
   active_ = false;
+  last_command_valid_ = false;
   fault_latched_ = true;
   if (!stop_issued_) {
     stop_issued_ = true;
     const bool stopped = arm_ && arm_->quick_stop();
     RCLCPP_ERROR(
       rclcpp::get_logger("MiraculousSystem"),
-      "FAULT LATCHED: %s. Quick-stop command result: %s. External drive reset "
+      "FAULT LATCHED: %s. Verified quick-stop result: %s. External drive reset "
       "and controller_manager restart are required.",
       reason.c_str(), stopped ? "success" : "failure");
   }

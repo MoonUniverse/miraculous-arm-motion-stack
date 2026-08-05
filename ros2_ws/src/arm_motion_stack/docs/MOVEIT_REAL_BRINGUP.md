@@ -1,6 +1,6 @@
 # MoveIt 真机接入与验收 Runbook
 
-更新日期：2026-07-30
+更新日期：2026-08-05
 
 本文是 `J1..J6` 六轴机械臂首次通过 MoveIt 驱动真机的唯一操作入口。
 第一阶段只验收关节空间的小步运动、取消和故障停机，不执行位姿目标或笛卡尔
@@ -12,13 +12,15 @@
 ## 1. 已实现的安全边界
 
 - `moveit_real.launch.py` 只接受完整六轴 profile。
-- 生产 profile 默认 `calibrated: false`，限位为空；未完成标定时 launch 会在
-  打开 CAN 或使能电机之前失败。
+- 生产 profile 默认 `calibrated: false`，其中限位和看门狗只是待验收值；未完成
+  六轴复核时 launch 会在打开 CAN 或使能电机之前失败。
 - launch 后 `ARMSystem` 是 `inactive`，`arm_controller` 也是 `inactive`。
   操作员必须分两步显式激活。
 - 激活 CSP 前后都用新鲜编码器反馈播种位置命令，避免首帧跳变。
-- 控制周期内出现目标写入失败、TPDO 反馈超过 30 ms、非有限数据、电机故障或
-  EMCY 时，驱动只发一次 arm-wide quick-stop，并锁存故障。
+- 任一目标 RPDO 写失败时，Driver 不再写后续轴，也不发送本周期 SYNC；随后
+  quick-stop并锁存故障。
+- TPDO 反馈超过 30 ms、单周期命令跳变超过 `0.005 rad`、跟踪误差超过
+  `0.05 rad` 达 3 个 fresh 周期、非有限数据、电机故障或 EMCY 都会停机。
 - 故障后不提供 ROS reset 服务，也不自动 fault-reset；必须退出整套进程，在
   外部完成驱动器复位后重新启动。
 - `arm_controller` 使用闭环状态反馈，不允许 partial goal 或非零末端速度。
@@ -61,7 +63,7 @@ colcon test-result --verbose
 ```bash
 git status --short --branch
 git -C ../miraculous_sdk status --short --branch
-ip -details link show can0
+ip -details link show can1
 ```
 
 六轴映射固定为：

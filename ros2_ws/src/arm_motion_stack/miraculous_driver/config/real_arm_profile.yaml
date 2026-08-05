@@ -1,7 +1,8 @@
 schema_version: 1
 
-# This file is intentionally not ready for motion.  Measure and review every
-# position limit, replace the null values, then set calibrated: true.
+# This file is intentionally not ready for motion. The populated limits and
+# watchdogs are provisional: verify all six axes on hardware, review the
+# values, then set calibrated: true.
 calibrated: false
 
 hardware:
@@ -16,6 +17,12 @@ hardware:
   manual_feedback_timeout_ms: 15
   feedback_stale_timeout_ms: 30
   enable_emcy_monitor: true
+  # At 50 Hz and 0.05 rad/s, a planned step is about 0.001 rad. This guard
+  # allows commissioning margin but rejects discontinuous commands.
+  max_command_step_rad: 0.005
+  # Match the JTC path tolerance and stop after three distinct feedback sets.
+  max_following_error_rad: 0.05
+  following_error_cycles: 3
 
 joints:
   J1:

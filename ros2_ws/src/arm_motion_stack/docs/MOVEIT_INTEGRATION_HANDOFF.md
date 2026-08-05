@@ -80,7 +80,7 @@ Real-hardware tests completed successfully:
 Playback uses a configurable manual-feedback deadline:
 
 ```text
-feedback_timeout_ms=10
+feedback_timeout_ms=15
 ```
 
 This is a maximum wait, not a fixed per-cycle delay. Feedback arrival wakes the

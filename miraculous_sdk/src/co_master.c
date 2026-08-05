@@ -132,14 +132,20 @@ MiraCoMaster* miraculous_co_init(MiraCanCtx *can_ctx, CiaBaudrate_t baudrate,
         int ret = miraculous_can_set_bitrate(can_ctx, baudrate);
         if (ret < 0) {
             fprintf(stderr, "[co_master] set bitrate %u failed\n", baudrate);
+            miraculous_can_close(can_ctx);
             return NULL;
         }
     }
 
     MiraCoMaster *co = calloc(1, sizeof(MiraCoMaster));
-    if (!co) return NULL;
+    if (!co) {
+        miraculous_can_close(can_ctx);
+        return NULL;
+    }
 
     co->can = can_ctx;
+    co->own_can = true;  /* co_init takes ownership on both success and failure */
+    co->refcount = 1;
 
     /* 创建子模块 */
     co->hb   = co_heartbeat_create();
@@ -149,43 +155,86 @@ MiraCoMaster* miraculous_co_init(MiraCanCtx *can_ctx, CiaBaudrate_t baudrate,
 
     if (!co->hb || !co->pdo || !co->sync || !co->emcy) {
         fprintf(stderr, "[co_master] failed to allocate sub-modules\n");
-        miraculous_co_free(co);
+        if (co->sync)  co_sync_destroy(co->sync);
+        if (co->hb)    co_heartbeat_destroy(co->hb);
+        if (co->pdo)   co_pdo_destroy(co->pdo);
+        if (co->emcy)  co_emcy_destroy(co->emcy);
+        miraculous_can_close(can_ctx);
+        free(co);
         return NULL;
     }
-
-    co->own_can   = true;  /* co_init 只在内部调用, 始终拥有 CAN */
 
     /* 子模块关联 CAN */
     co_heartbeat_set_can(co->hb, can_ctx);
     co_sync_set_can(co->sync, can_ctx);
 
     /* 注册全局接收回调 (分发 Heartbeat/EMCY/TPDO) */
-    miraculous_can_set_recv_callback(can_ctx, co_global_recv_callback, co);
+    if (miraculous_can_set_recv_callback(can_ctx, co_global_recv_callback, co) < 0) {
+        fprintf(stderr, "[co_master] failed to register CAN receive callback\n");
+        co_sync_destroy(co->sync);
+        co_heartbeat_destroy(co->hb);
+        co_pdo_destroy(co->pdo);
+        co_emcy_destroy(co->emcy);
+        miraculous_can_close(can_ctx);
+        free(co);
+        return NULL;
+    }
 
     /* 初始化 SDO 队列锁 */
-    pthread_mutex_init(&co->sdo_queue_lock, NULL);
+    if (pthread_mutex_init(&co->sdo_queue_lock, NULL) != 0) {
+        goto init_lock_failure;
+    }
+    if (pthread_mutex_init(&co->motor_registry_lock, NULL) != 0) {
+        pthread_mutex_destroy(&co->sdo_queue_lock);
+        goto init_lock_failure;
+    }
     memset(co->sdo_wait_queue, 0, sizeof(co->sdo_wait_queue));
 
     /* 初始化每节点 SDO 锁 */
+    int initialized_nodes = 0;
     for (int i = 0; i < 128; i++) {
-        pthread_mutex_init(&co->sdo_node_lock[i], NULL);
-        pthread_cond_init(&co->sdo_node_cond[i], NULL);
+        if (pthread_mutex_init(&co->sdo_node_lock[i], NULL) != 0) {
+            goto node_lock_failure;
+        }
+        if (pthread_cond_init(&co->sdo_node_cond[i], NULL) != 0) {
+            pthread_mutex_destroy(&co->sdo_node_lock[i]);
+            goto node_lock_failure;
+        }
         co->sdo_node_busy[i] = false;
+        initialized_nodes++;
     }
-    co->refcount = 1;
-    co->recv_running = false;
-    co->recv_stop = false;
+    __atomic_store_n(&co->recv_running, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&co->recv_stop, false, __ATOMIC_RELAXED);
 
     printf("[co_master] initialized (baudrate=%u)\n", baudrate);
 
     if (start_recv_thread) {
         int r = miraculous_co_recv_start(co);
         if (r < 0) {
-            printf("[co_master] recv thread start failed\n");
+            fprintf(stderr, "[co_master] recv thread start failed\n");
+            miraculous_co_free(co);
+            return NULL;
         }
     }
 
     return co;
+
+node_lock_failure:
+    for (int i = 0; i < initialized_nodes; i++) {
+        pthread_mutex_destroy(&co->sdo_node_lock[i]);
+        pthread_cond_destroy(&co->sdo_node_cond[i]);
+    }
+    pthread_mutex_destroy(&co->motor_registry_lock);
+    pthread_mutex_destroy(&co->sdo_queue_lock);
+
+init_lock_failure:
+    co_sync_destroy(co->sync);
+    co_heartbeat_destroy(co->hb);
+    co_pdo_destroy(co->pdo);
+    co_emcy_destroy(co->emcy);
+    miraculous_can_close(can_ctx);
+    free(co);
+    return NULL;
 }
 
 void miraculous_co_free(MiraCoMaster *co)
@@ -198,7 +247,7 @@ void miraculous_co_free(MiraCoMaster *co)
     }
 
     /* 停止接收线程 */
-    if (co->recv_running) {
+    if (__atomic_load_n(&co->recv_running, __ATOMIC_ACQUIRE)) {
         miraculous_co_recv_stop(co);
     }
 
@@ -214,6 +263,7 @@ void miraculous_co_free(MiraCoMaster *co)
     }
 
     pthread_mutex_destroy(&co->sdo_queue_lock);
+    pthread_mutex_destroy(&co->motor_registry_lock);
 
     if (co->own_can && co->can) {
         miraculous_can_close(co->can);
@@ -342,9 +392,9 @@ static void* co_recv_thread_func(void *arg)
     ev.data.fd = can_fd;        /* data.fd == can_fd → CAN 帧 */
     epoll_ctl(local_ep, EPOLL_CTL_MOD, can_fd, &ev);
 
-    co->recv_running = true;
+    __atomic_store_n(&co->recv_running, true, __ATOMIC_RELEASE);
 
-    while (!co->recv_stop) {
+    while (!__atomic_load_n(&co->recv_stop, __ATOMIC_ACQUIRE)) {
         struct epoll_event events[2];
         int nfds = epoll_wait(local_ep, events, 2, 100);
         if (nfds < 0) {
@@ -415,7 +465,7 @@ static void* co_recv_thread_func(void *arg)
         }
     }
 
-    co->recv_running = false;
+    __atomic_store_n(&co->recv_running, false, __ATOMIC_RELEASE);
     close(local_ep);
     return NULL;
 }
@@ -424,9 +474,9 @@ static void* co_recv_thread_func(void *arg)
 int miraculous_co_recv_start(MiraCoMaster *co)
 {
     if (!co) return MRC_ERROR_INVALID_PARAM;
-    if (co->recv_running) return MRC_SUCCESS;
+    if (__atomic_load_n(&co->recv_running, __ATOMIC_ACQUIRE)) return MRC_SUCCESS;
 
-    co->recv_stop = false;
+    __atomic_store_n(&co->recv_stop, false, __ATOMIC_RELEASE);
 
     /* 尝试创建线程, 优先实时调度 (SCHED_FIFO), 失败则回退到普通调度 */
     pthread_attr_t attr;
@@ -447,10 +497,11 @@ int miraculous_co_recv_start(MiraCoMaster *co)
     if (ret != 0) return MRC_ERROR_UNKNOWN;
 
     /* 等待线程完成初始化 (最大 1s) */
-    for (int i = 0; i < 100 && !co->recv_running; i++)
+    for (int i = 0; i < 100 &&
+         !__atomic_load_n(&co->recv_running, __ATOMIC_ACQUIRE); i++)
         usleep(10000);
-    if (!co->recv_running) {
-        co->recv_stop = true;
+    if (!__atomic_load_n(&co->recv_running, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&co->recv_stop, true, __ATOMIC_RELEASE);
         pthread_join(co->recv_thread, NULL);
         return MRC_ERROR_UNKNOWN;
     }
@@ -459,8 +510,8 @@ int miraculous_co_recv_start(MiraCoMaster *co)
 
 void miraculous_co_recv_stop(MiraCoMaster *co)
 {
-    if (!co || !co->recv_running) return;
-    co->recv_stop = true;
+    if (!co || !__atomic_load_n(&co->recv_running, __ATOMIC_ACQUIRE)) return;
+    __atomic_store_n(&co->recv_stop, true, __ATOMIC_RELEASE);
     pthread_join(co->recv_thread, NULL);
-    co->recv_stop = false;
+    __atomic_store_n(&co->recv_stop, false, __ATOMIC_RELEASE);
 }

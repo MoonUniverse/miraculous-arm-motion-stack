@@ -38,31 +38,16 @@ static struct {
 } g_bus_reg[MAX_BUS_REGISTRY];
 static pthread_mutex_t g_bus_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static MiraCoMaster* find_master(const char *ifname)
+/* 持锁版本 (调用者已持 g_bus_lock) */
+static void unreg_master_locked(MiraCoMaster *co)
 {
-    pthread_mutex_lock(&g_bus_lock);
-    for (int i = 0; i < MAX_BUS_REGISTRY; i++) {
-        if (g_bus_reg[i].master &&
-            strcmp(g_bus_reg[i].ifname, ifname) == 0) {
-            pthread_mutex_unlock(&g_bus_lock);
-            return g_bus_reg[i].master;
-        }
-    }
-    pthread_mutex_unlock(&g_bus_lock);
-    return NULL;
-}
-
-static void unreg_master(MiraCoMaster *co)
-{
-    pthread_mutex_lock(&g_bus_lock);
     for (int i = 0; i < MAX_BUS_REGISTRY; i++) {
         if (g_bus_reg[i].master == co) {
             g_bus_reg[i].master = NULL;
-            pthread_mutex_unlock(&g_bus_lock);
+            g_bus_reg[i].ifname[0] = '\0';
             return;
         }
     }
-    pthread_mutex_unlock(&g_bus_lock);
 }
 
 /* 持锁版本 (调用者已持 g_bus_lock) */
@@ -82,12 +67,26 @@ static int reg_master_locked(const char *ifname, MiraCoMaster *co)
     for (int i = 0; i < MAX_BUS_REGISTRY; i++) {
         if (!g_bus_reg[i].master) {
             strncpy(g_bus_reg[i].ifname, ifname, IFNAMSIZ - 1);
-            g_bus_reg[i].ifname[IFNAMSIZ - 1] = '0';
+            g_bus_reg[i].ifname[IFNAMSIZ - 1] = '\0';
             g_bus_reg[i].master = co;
             return 0;
         }
     }
     return -1;
+}
+
+/* Release one motor's master reference while serializing against opens and
+ * other closes.  miraculous_co_init() creates the first motor reference;
+ * subsequent motors increment it. */
+static void release_master(MiraCoMaster *co)
+{
+    if (!co) return;
+    pthread_mutex_lock(&g_bus_lock);
+    if (miraculous_co_ref_count(co) <= 1) {
+        unreg_master_locked(co);
+    }
+    miraculous_co_free(co);
+    pthread_mutex_unlock(&g_bus_lock);
 }
 
 /*----------------------------------------------------------------------------
@@ -130,6 +129,25 @@ static int motor_sdo_read_i16(MiraMotor *m, uint16_t idx, uint8_t sub,
                                    val, &len, MOTION_SDO_TIMEOUT_MS);
 }
 
+static int32_t decode_i32_le(const uint8_t *data)
+{
+    uint32_t raw = (uint32_t)data[0]
+                 | ((uint32_t)data[1] << 8)
+                 | ((uint32_t)data[2] << 16)
+                 | ((uint32_t)data[3] << 24);
+    int32_t value;
+    memcpy(&value, &raw, sizeof(value));
+    return value;
+}
+
+static int16_t decode_i16_le(const uint8_t *data)
+{
+    uint16_t raw = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+    int16_t value;
+    memcpy(&value, &raw, sizeof(value));
+    return value;
+}
+
 /*----------------------------------------------------------------------------
  * 状态解析
  *----------------------------------------------------------------------------*/
@@ -164,21 +182,24 @@ static void on_tpdo1(uint8_t node_id, uint8_t pdo_num,
 
     if (pdo_num == 2 && len >= 8) {
     /* TPDO1(0x280+nid) 映射: 0x6064(4B) + 0x606C(4B), LE */
-    motor->pdo_pos  = (int32_t)(data[0] | (data[1] << 8)
-                              | (data[2] << 16) | (data[3] << 24));
-    motor->pdo_vel  = (int32_t)(data[4] | (data[5] << 8)
-                              | (data[6] << 16) | (data[7] << 24));
-    __sync_synchronize();
-    motor->pdo_valid = true;
+    __atomic_store_n(&motor->pdo_pos, decode_i32_le(data), __ATOMIC_RELAXED);
+    __atomic_store_n(&motor->pdo_vel, decode_i32_le(data + 4), __ATOMIC_RELAXED);
+    __atomic_store_n(&motor->pdo_valid, true, __ATOMIC_RELEASE);
     } else if (pdo_num == 3 && len >= 2) {
         /* TPDO3(0x380+nid) 映射: 0x6077 实际转矩 (16位) */
-        motor->pdo_torque = (int16_t)(data[0] | (data[1] << 8));
+        __atomic_store_n(&motor->pdo_torque, decode_i16_le(data), __ATOMIC_RELEASE);
     }
 
-    /* 调用用户注册的 TPDO 回调 */
-    if (motor->tpdo_user_cb) {
-        motor->tpdo_user_cb(node_id, pdo_num, data, len,
-                             motor->tpdo_user_data);
+    /* Snapshot the callback pair under the lock, then invoke it unlocked.
+     * The surrounding PDO registry keeps MiraMotor alive through this handler;
+     * invoking user code while holding callback_lock would deadlock if the
+     * callback updates or clears its own registration. */
+    pthread_mutex_lock(&motor->callback_lock);
+    MiraTpdoCallback callback = motor->tpdo_user_cb;
+    void *callback_data = motor->tpdo_user_data;
+    pthread_mutex_unlock(&motor->callback_lock);
+    if (callback) {
+        callback(node_id, pdo_num, data, len, callback_data);
     }
 }
 
@@ -192,8 +213,13 @@ MiraMotor* miraculous_motor_open(const char *ifname,
 {
     if (!ifname || node_id == 0 || node_id > 127) return NULL;
 
-    /* 检查是否已有同一 ifname 的 master */
-    MiraCoMaster *co = find_master(ifname);
+    /* 检查是否已有同一 ifname 的 master，并在注册表锁内取得引用。 */
+    pthread_mutex_lock(&g_bus_lock);
+    MiraCoMaster *co = find_master_locked(ifname);
+    if (co) {
+        miraculous_co_ref_inc(co);
+    }
+    pthread_mutex_unlock(&g_bus_lock);
 
     if (!co) {
         /* 没有: 创建新 CAN + CANopen 主站 */
@@ -206,7 +232,6 @@ MiraMotor* miraculous_motor_open(const char *ifname,
         co = miraculous_co_init(can, baudrate, true);
         if (!co) {
             fprintf(stderr, "[motor] co_init failed\n");
-            miraculous_can_close(can);
             return NULL;
         }
         /* 双检锁: 持锁确认无其他线程抢先注册 */
@@ -214,30 +239,57 @@ MiraMotor* miraculous_motor_open(const char *ifname,
         MiraCoMaster *existing = find_master_locked(ifname);
         if (existing) {
             /* 其他线程已注册, 释放新创建的, 使用已有的 */
+            miraculous_co_ref_inc(existing);
             pthread_mutex_unlock(&g_bus_lock);
             miraculous_co_free(co);
             co = existing;
         } else {
             /* 注册到全局表 */
-            reg_master_locked(ifname, co);
+            if (reg_master_locked(ifname, co) != 0) {
+                pthread_mutex_unlock(&g_bus_lock);
+                fprintf(stderr, "[motor] bus registry full\n");
+                miraculous_co_free(co);
+                return NULL;
+            }
             pthread_mutex_unlock(&g_bus_lock);
         }
-        miraculous_co_ref_inc(co);
-    } else {
-        miraculous_co_ref_inc(co);
     }
     /* 创建电机句柄 */
     MiraMotor *motor = calloc(1, sizeof(MiraMotor));
     if (!motor) {
-        miraculous_co_free(co);
+        release_master(co);
+        return NULL;
+    }
+
+    if (pthread_mutex_init(&motor->sdo_async_lock, NULL) != 0) {
+        free(motor);
+        release_master(co);
+        return NULL;
+    }
+    if (pthread_mutex_init(&motor->callback_lock, NULL) != 0) {
+        pthread_mutex_destroy(&motor->sdo_async_lock);
+        free(motor);
+        release_master(co);
         return NULL;
     }
 
     motor->co      = co;
     motor->node_id = node_id;
-    co->motor_by_node[node_id] = motor;
     motor->encoder_bw = 19;  /* 默认 19-bit (524288 counts/rev), 用户可改 */
     motor->reduction_ratio = 100.0f; /* 默认减速比 100 */
+
+    pthread_mutex_lock(&co->motor_registry_lock);
+    if (co->motor_by_node[node_id]) {
+        pthread_mutex_unlock(&co->motor_registry_lock);
+        fprintf(stderr, "[motor] node %d is already open on %s\n", node_id, ifname);
+        pthread_mutex_destroy(&motor->callback_lock);
+        pthread_mutex_destroy(&motor->sdo_async_lock);
+        free(motor);
+        release_master(co);
+        return NULL;
+    }
+    co->motor_by_node[node_id] = motor;
+    pthread_mutex_unlock(&co->motor_registry_lock);
 
     /* 注册 TPDO2(0x280+nid) 回调: 固件映射 0x6064(位置)+0x606C(速度) */
     int ret2 = miraculous_co_pdo_set_tpdo_callback(co, node_id, 2,
@@ -254,6 +306,20 @@ MiraMotor* miraculous_motor_open(const char *ifname,
     if (ret3 < 0) {
         fprintf(stderr, "[motor] TPDO3 callback register failed for node %d: %s\n",
                 node_id, mrc_strerror(ret3));
+    }
+
+    if (ret2 < 0 || ret3 < 0) {
+        miraculous_co_pdo_remove_tpdo_callbacks(co, node_id, motor);
+        pthread_mutex_lock(&co->motor_registry_lock);
+        if (co->motor_by_node[node_id] == motor) {
+            co->motor_by_node[node_id] = NULL;
+        }
+        pthread_mutex_unlock(&co->motor_registry_lock);
+        pthread_mutex_destroy(&motor->callback_lock);
+        pthread_mutex_destroy(&motor->sdo_async_lock);
+        free(motor);
+        release_master(co);
+        return NULL;
     }
 
     printf("[motor] opened: iface=%s node=%d (refcount=%d)\n",
@@ -274,7 +340,18 @@ void miraculous_motor_close(MiraMotor *motor)
         miraculous_co_sync_stop(co);
     }
 
-    /* 清理异步 SDO 任务 */
+    /* Remove SDK callbacks first. The PDO registry lock waits for any in-flight
+     * TPDO callback before the motor handle can be freed. */
+    if (co) {
+        miraculous_co_pdo_remove_tpdo_callbacks(co, nid, motor);
+    }
+
+    /* Remove the handle from asynchronous SDO dispatch and clean its tasks
+     * while holding the master registry lock. */
+    if (co) pthread_mutex_lock(&co->motor_registry_lock);
+    if (co && co->motor_by_node[nid] == motor) {
+        co->motor_by_node[nid] = NULL;
+    }
     pthread_mutex_lock(&motor->sdo_async_lock);
     {
         MiraSdoAsyncTask *t = motor->sdo_async_list;
@@ -286,18 +363,17 @@ void miraculous_motor_close(MiraMotor *motor)
         motor->sdo_async_list = NULL;
     }
     pthread_mutex_unlock(&motor->sdo_async_lock);
+    if (co) pthread_mutex_unlock(&co->motor_registry_lock);
+
+    pthread_mutex_lock(&motor->callback_lock);
+    motor->tpdo_user_cb = NULL;
+    motor->tpdo_user_data = NULL;
+    pthread_mutex_unlock(&motor->callback_lock);
+    pthread_mutex_destroy(&motor->callback_lock);
     pthread_mutex_destroy(&motor->sdo_async_lock);
-    co->motor_by_node[nid] = NULL;
     free(motor);
 
-    /* co_free 内部会减 refcount, 仅当最后一个 motor 时才真正释放 */
-    if (co) {
-        /* 如果这是最后一个引用, 从注册表移除 */
-        if (miraculous_co_ref_count(co) <= 1) {
-            unreg_master(co);
-        }
-        miraculous_co_free(co);
-    }
+    release_master(co);
 
     printf("[motor] closed node %d\n", nid);
 }
@@ -329,8 +405,10 @@ int miraculous_motor_set_tpdo_callback(MiraMotor *motor,
                                         void *user_data)
 {
     if (!motor) return MRC_ERROR_INVALID_PARAM;
+    pthread_mutex_lock(&motor->callback_lock);
     motor->tpdo_user_cb = callback;
     motor->tpdo_user_data = user_data;
+    pthread_mutex_unlock(&motor->callback_lock);
     return MRC_SUCCESS;
 }
 
@@ -687,9 +765,8 @@ int miraculous_motor_get_supported_modes(MiraMotor *motor, uint32_t *modes)
 int miraculous_motor_get_position(MiraMotor *motor, int32_t *pos)
 {
     if (!motor || !pos) return MRC_ERROR_INVALID_PARAM;
-    __sync_synchronize();
-    if (motor->pdo_valid) {
-        *pos = motor->pdo_pos;
+    if (__atomic_load_n(&motor->pdo_valid, __ATOMIC_ACQUIRE)) {
+        *pos = __atomic_load_n(&motor->pdo_pos, __ATOMIC_RELAXED);
         return MRC_SUCCESS;
     }
     return MRC_ERROR_TIMEOUT;
@@ -735,11 +812,8 @@ int miraculous_motor_set_target_position_ex(MiraMotor *motor, float pos, PosUnit
     if (!motor) return MRC_ERROR_INVALID_PARAM;
 
     int32_t pulses;
-    if (unit == POS_UNIT_RADIAN) {
-        pulses = RAD_TO_POS(pos, motor->encoder_bw);
-    } else {
-        pulses = DEG_TO_POS(pos, motor->encoder_bw);
-    }
+    int ret = miraculous_position_to_counts(pos, unit, motor->encoder_bw, &pulses);
+    if (ret < 0) return ret;
 
     return motor_sdo_write_i32(motor, CIA402_OD_TARGET_POSITION, 0, pulses);
 }
@@ -754,7 +828,7 @@ int miraculous_motor_set_encoder_bw(MiraMotor *motor, uint8_t bw)
 
 int miraculous_motor_set_reduction_ratio(MiraMotor *motor, float ratio)
 {
-    if (!motor || ratio <= 0) return MRC_ERROR_INVALID_PARAM;
+    if (!motor || !isfinite(ratio) || ratio <= 0) return MRC_ERROR_INVALID_PARAM;
     motor->reduction_ratio = ratio;
     return MRC_SUCCESS;
 }
@@ -780,9 +854,8 @@ int miraculous_motor_sync_send(MiraMotor *motor)
 int miraculous_motor_get_velocity(MiraMotor *motor, int32_t *vel)
 {
     if (!motor || !vel) return MRC_ERROR_INVALID_PARAM;
-    __sync_synchronize();
-    if (motor->pdo_valid) {
-        *vel = motor->pdo_vel;
+    if (__atomic_load_n(&motor->pdo_valid, __ATOMIC_ACQUIRE)) {
+        *vel = __atomic_load_n(&motor->pdo_vel, __ATOMIC_RELAXED);
         return MRC_SUCCESS;
     }
     return MRC_ERROR_TIMEOUT;
@@ -812,7 +885,7 @@ int miraculous_motor_get_torque(MiraMotor *motor, int16_t *torque)
 {
     if (!motor || !torque) return MRC_ERROR_INVALID_PARAM;
     /* 转矩通过 TPDO3 缓存, 不依赖 SDO */
-    *torque = motor->pdo_torque;
+    *torque = __atomic_load_n(&motor->pdo_torque, __ATOMIC_ACQUIRE);
     return MRC_SUCCESS;
 }
 

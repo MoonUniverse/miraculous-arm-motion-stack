@@ -20,6 +20,7 @@
 #include "std_srvs/srv/trigger.hpp"
 
 #include "miraculous_driver/miraculous_arm.hpp"
+#include "strict_parameter_lists.hpp"
 
 using miraculous_driver::ArmConfig;
 using miraculous_driver::FeedbackSample;
@@ -30,22 +31,6 @@ using miraculous_driver::kArmJoints;
 namespace
 {
 constexpr int kStartupFeedbackWindowMs = 500;
-
-std::vector<int> parse_int_list(const std::string & s, const std::vector<int> & def)
-{
-  if (s.empty()) {
-    return def;
-  }
-  std::vector<int> out;
-  std::stringstream ss(s);
-  std::string tok;
-  while (std::getline(ss, tok, ',')) {
-    try {
-      out.push_back(std::stoi(tok));
-    } catch (...) {}
-  }
-  return out.empty() ? def : out;
-}
 
 std::vector<int> default_joint_indices(size_t size)
 {
@@ -96,8 +81,8 @@ class TeachRecordNode : public rclcpp::Node
 public:
   TeachRecordNode() : Node("teach_record")
   {
-    can_interface_ = declare_parameter<std::string>("can_interface", "can0");
-    baudrate_ = declare_parameter<int>("baudrate", 1000);
+    can_interface_ = declare_parameter<std::string>("can_interface", "can1");
+    baudrate_ = declare_parameter<int>("baudrate", 0);
     const std::string node_ids_str =
       declare_parameter<std::string>("node_ids", "1,2,3,4,5,6");
     const std::string joint_indices_str =
@@ -107,10 +92,14 @@ public:
     record_rate_ = declare_parameter<double>("record_rate", 50.0);
     output_file_ = declare_parameter<std::string>("output_file", "");
     auto_record_ = declare_parameter<bool>("auto_record", false);
-    feedback_timeout_ms_ = declare_parameter<int>("feedback_timeout_ms", 5);
+    feedback_timeout_ms_ = declare_parameter<int>("feedback_timeout_ms", 15);
     max_consecutive_misses_ = declare_parameter<int>("max_consecutive_misses", 10);
     overwrite_existing_ = declare_parameter<bool>("overwrite_existing", false);
 
+    if (can_interface_.empty() || baudrate_ < 0) {
+      RCLCPP_FATAL(get_logger(), "can_interface must be non-empty and baudrate non-negative");
+      throw std::runtime_error("bad CAN parameters");
+    }
     if (!std::isfinite(record_rate_) || record_rate_ <= 0.0 || record_rate_ > 200.0) {
       RCLCPP_FATAL(get_logger(), "record_rate must be in (0, 200] Hz");
       throw std::runtime_error("bad record_rate");
@@ -124,9 +113,11 @@ public:
       throw std::runtime_error("bad max_consecutive_misses");
     }
 
-    const auto node_ids = parse_int_list(node_ids_str, {1, 2, 3, 4, 5, 6});
+    const auto node_ids = miraculous_driver::parse_int_parameter_list(
+      node_ids_str, {1, 2, 3, 4, 5, 6}, "node_ids");
     const auto joint_indices =
-      parse_int_list(joint_indices_str, default_joint_indices(node_ids.size()));
+      miraculous_driver::parse_int_parameter_list(
+      joint_indices_str, default_joint_indices(node_ids.size()), "joint_indices");
     if (node_ids.empty() || node_ids.size() > miraculous_driver::kArmJoints ||
       !validate_node_ids(node_ids))
     {
@@ -501,12 +492,12 @@ private:
   }
 
   std::string can_interface_;
-  int baudrate_{1000};
+  int baudrate_{0};
   std::string joint_states_topic_;
   double record_rate_{50.0};
   std::string output_file_;
   bool auto_record_{false};
-  int feedback_timeout_ms_{5};
+  int feedback_timeout_ms_{15};
   int max_consecutive_misses_{10};
   bool overwrite_existing_{false};
   std::vector<JointConfig> joints_;

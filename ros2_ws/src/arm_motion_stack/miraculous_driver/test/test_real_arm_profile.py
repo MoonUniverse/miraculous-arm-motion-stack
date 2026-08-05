@@ -11,17 +11,20 @@ def _valid_profile():
         "schema_version": 1,
         "calibrated": True,
         "hardware": {
-            "can_interface": "can0",
-            "baudrate": 1000,
+            "can_interface": "can1",
+            "baudrate": 0,
             "encoder_bw": 19,
             "reduction_ratio": 100.0,
             "sync_period_us": 0,
-            "controller_update_rate_hz": 100,
-            "read_rate_hz": 100.0,
+            "controller_update_rate_hz": 50,
+            "read_rate_hz": 50.0,
             "state_poll_rate_hz": 0.0,
-            "manual_feedback_timeout_ms": 5,
+            "manual_feedback_timeout_ms": 15,
             "feedback_stale_timeout_ms": 30,
             "enable_emcy_monitor": True,
+            "max_command_step_rad": 0.005,
+            "max_following_error_rad": 0.05,
+            "following_error_cycles": 3,
         },
         "joints": {
             name: {
@@ -57,6 +60,28 @@ def test_zero_baudrate_keeps_existing_socketcan_configuration(tmp_path):
     assert profile.baudrate == 0
 
 
+def test_timer_sync_is_rejected_for_real_moveit(tmp_path):
+    raw_profile = _valid_profile()
+    raw_profile["hardware"]["sync_period_us"] = 10_000
+    with pytest.raises(ValueError, match="must be 0"):
+        load_real_arm_profile(_write(tmp_path, raw_profile))
+
+
+def test_production_profile_preserves_tested_bus_baseline():
+    path = Path(__file__).parents[1] / "config" / "real_arm_profile.yaml"
+    profile = load_real_arm_profile(str(path), require_calibrated=False)
+    assert profile.can_interface == "can1"
+    assert profile.baudrate == 0
+    assert profile.controller_update_rate_hz == 50
+    assert profile.read_rate_hz == 50.0
+    assert profile.manual_feedback_timeout_ms == 15
+    assert profile.sync_period_us == 0
+    assert profile.enable_emcy_monitor is True
+    assert profile.max_command_step_rad == 0.005
+    assert profile.max_following_error_rad == 0.05
+    assert profile.following_error_cycles == 3
+
+
 def test_production_template_is_rejected_for_real_motion():
     path = Path(__file__).parents[1] / "config" / "real_arm_profile.yaml"
     with pytest.raises(ValueError, match="not calibrated"):
@@ -70,8 +95,12 @@ def test_production_template_is_rejected_for_real_motion():
         (lambda p: p["joints"]["J1"].update(position_min=2.0), "less than"),
         (lambda p: p["joints"]["J2"].update(position_max=2.0), "exceed URDF"),
         (lambda p: p["hardware"].update(baudrate=-1), "non-negative"),
+        (lambda p: p["hardware"].update(encoder_bw=32), r"\[1, 31\]"),
         (lambda p: p["hardware"].update(feedback_stale_timeout_ms=5), "greater"),
         (lambda p: p["hardware"].update(read_rate_hz=float("nan")), "finite"),
+        (lambda p: p["hardware"].update(enable_emcy_monitor=False), "must be true"),
+        (lambda p: p["hardware"].update(max_command_step_rad=0.0), "greater than zero"),
+        (lambda p: p["hardware"].update(following_error_cycles=0), "greater than zero"),
     ],
 )
 def test_invalid_profiles_fail_closed(tmp_path, mutate, message):

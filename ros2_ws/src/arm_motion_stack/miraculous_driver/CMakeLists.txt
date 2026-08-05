@@ -131,6 +131,7 @@ if(BUILD_TESTING)
        -Wl,--wrap=miraculous_motor_get_velocity_ex \
        -Wl,--wrap=miraculous_motor_csp_set_target_ex \
        -Wl,--wrap=miraculous_motor_enable \
+       -Wl,--wrap=miraculous_motor_disable \
        -Wl,--wrap=miraculous_motor_quick_stop \
        -Wl,--wrap=miraculous_motor_disable_voltage \
        -Wl,--wrap=miraculous_motor_fault_reset"
@@ -140,6 +141,11 @@ if(BUILD_TESTING)
     test/test_playback_csv_header.cpp
   )
   target_include_directories(test_playback_csv_header PRIVATE src)
+
+  ament_add_gtest(test_strict_parameter_lists
+    test/test_strict_parameter_lists.cpp
+  )
+  target_include_directories(test_strict_parameter_lists PRIVATE src)
 
   ament_add_gtest(test_miraculous_system
     test/test_miraculous_system.cpp

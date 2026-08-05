@@ -12,7 +12,7 @@
 
 ### 核心能力
 
-- 以指定频率 (默认 100Hz) 向选定关节下发同相 sin/cos 位置命令
+- 以指定频率 (默认 50 Hz) 向选定关节下发同相 sin/cos 位置命令
 - 同一周期先写入所有已配置电机目标, 再通过一帧广播 SYNC 同步锁存
 - 同步记录每一步的 **命令值** 和 **编码器实际值**, 保证时间对齐
 - 为每个测试关节分别计算 RMSE、MAE、最大误差、相关系数、相位滞后
@@ -37,7 +37,7 @@
 ### 2.1 数据流
 
 ```
-TrajectoryTrackingTestNode::on_timer() [100Hz 稳态定时器]
+TrajectoryTrackingTestNode::on_timer() [50 Hz 稳态定时器]
     │
     │  1. t = (now - start_time).seconds()
     │  2. waveform = sin(2π × t / period)
@@ -121,12 +121,13 @@ for (joint : test_joints) {
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `can_interface` | string | `can0` | SocketCAN 接口名 |
-| `baudrate` | int | `1000` | CAN 波特率 (kbps) |
+| `can_interface` | string | `can1` | 已验证的 SocketCAN 接口名 |
+| `baudrate` | int | `0` | 保持 SocketCAN 当前配置，不由 SDK 重配 |
 | `node_ids` | string | `1,2,3,4,5,6` | 已安装电机的 CANopen 节点 ID |
 | `joint_indices` | string | `0,1,2,3,4,5` | 每个 `node_id` 对应的 ROS 关节槽位, `0=J1 ... 5=J6` |
-| `position_min` | string | `0.0,...` | 软件下限 [rad], 可填 1 个、已装关节数量 N 个、或 6 个全量值 |
-| `position_max` | string | `0.0,...` | 软件上限 [rad], 可填 1 个、已装关节数量 N 个、或 6 个全量值 |
+| `position_min` | string | `0.0,...` | 占位值；主动测试前必须替换为有限真实下限 [rad] |
+| `position_max` | string | `0.0,...` | 占位值；主动测试前必须替换为有限真实上限 [rad] |
+| `sync_period_us` | int | `0` | 必须为 0，Driver-owned Manual SYNC |
 
 ### 4.2 轨迹参数
 
@@ -134,12 +135,16 @@ for (joint : test_joints) {
 |------|------|--------|------|
 | `amplitude` | double | `0.03` | 正弦/余弦幅值 [rad], 第一阶段保守默认值 |
 | `period` | double | `6.0` | 一个完整周期 [s] |
-| `frequency` | double | `100.0` | 命令下发频率 [Hz] |
+| `frequency` | double | `50.0` | 命令下发频率 [Hz] |
 | `waveform` | string | `sin` | 波形类型: `sin` 或 `cos` |
 | `test_joint` | int | `0` | 兼容参数: 单个测试关节索引, `test_joints` 为空时生效 |
 | `test_joints` | string | `""` | 多关节索引, 例如 `0,1` 表示 J1/J2 同相同步测试 |
 | `duration` | double | `3.0` | 自动停止时间 [s] (0=手动) |
 | `settle_time` | double | `0.5` | 使能后等待稳定时间 [s] |
+| `feedback_timeout_ms` | int | `15` | 每次 Manual SYNC 后完整新 TPDO2 deadline [ms] |
+| `max_command_step_rad` | double | `0.005` | 单周期允许的最大目标变化 [rad] |
+| `max_following_error_rad` | double | `0.05` | Driver 层最大 commanded-actual 误差 [rad] |
+| `following_error_cycles` | int | `3` | 连续超差的新鲜反馈周期数 |
 
 ### 4.3 输出参数
 
@@ -170,10 +175,10 @@ source install/setup.bash
 export ARM_LIMIT_MIN="MIN_J1,MIN_J2,MIN_J3,MIN_J4,MIN_J5,MIN_J6"
 export ARM_LIMIT_MAX="MAX_J1,MAX_J2,MAX_J3,MAX_J4,MAX_J5,MAX_J6"
 
-# 第一阶段推荐: J1, sin, 0.03 rad, 3 秒自动停止, 100 Hz
+# 第一阶段推荐: J1, sin, 0.03 rad, 3 秒自动停止, 50 Hz Manual SYNC
 ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
-  can_interface:=can0 \
-  baudrate:=1000 \
+  can_interface:=can1 \
+  baudrate:=0 \
   node_ids:=1 \
   joint_indices:=0 \
   position_min:="$ARM_LIMIT_MIN" \
@@ -181,12 +186,14 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py
   test_joint:=0 \
   amplitude:=0.03 \
   period:=6.0 \
+  frequency:=50.0 \
+  sync_period_us:=0 \
   duration:=3.0
 
 # J1 通过后再逐轴测试, 例如 J3:
 ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
-  can_interface:=can0 \
-  baudrate:=1000 \
+  can_interface:=can1 \
+  baudrate:=0 \
   node_ids:=1,2,3 \
   joint_indices:=0,1,2 \
   position_min:="$ARM_LIMIT_MIN" \
@@ -194,6 +201,8 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py
   test_joint:=2 \
   amplitude:=0.03 \
   period:=6.0 \
+  frequency:=50.0 \
+  sync_period_us:=0 \
   duration:=3.0
 
 # J1/J2 同相同步正弦测试:
@@ -225,7 +234,7 @@ ros2 service call /trajectory_test/start std_srvs/srv/Trigger
 1. enable_csp() 使能电机
 2. 等待 settle_time (0.5s) 让电机稳定
 3. 读取当前位置作为 DC offset
-4. 开始 100Hz 定时器下发轨迹 + 记录数据
+4. 开始 50 Hz 定时器下发轨迹 + 记录数据
 
 ### 5.4 停止测试
 
@@ -423,10 +432,11 @@ export ARM_LIMIT_MAX="MAX_J1,MAX_J2,MAX_J3,MAX_J4,MAX_J5,MAX_J6"
 
 # === 启动 J1 小幅跟随测试 ===
 ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
-  can_interface:=can0 baudrate:=1000 \
+  can_interface:=can1 baudrate:=0 \
   node_ids:=1 joint_indices:=0 \
   position_min:="$ARM_LIMIT_MIN" position_max:="$ARM_LIMIT_MAX" \
-  test_joint:=0 amplitude:=0.03 period:=6.0 duration:=3.0
+  test_joint:=0 amplitude:=0.03 period:=6.0 frequency:=50.0 \
+  sync_period_us:=0 duration:=3.0
 
 # === 开始 ===
 ros2 service call /trajectory_test/start std_srvs/srv/Trigger

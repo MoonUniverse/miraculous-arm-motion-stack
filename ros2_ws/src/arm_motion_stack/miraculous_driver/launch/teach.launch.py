@@ -53,15 +53,15 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
-        DeclareLaunchArgument("can_interface", default_value="can0"),
-        DeclareLaunchArgument("baudrate", default_value="1000"),
+        DeclareLaunchArgument("can_interface", default_value="can1"),
+        DeclareLaunchArgument("baudrate", default_value="0"),
         DeclareLaunchArgument("node_ids", default_value="1,2,3,4,5,6"),
         DeclareLaunchArgument("joint_indices", default_value="0,1,2,3,4,5",
                               description="ROS joint indices for node_ids: 0=J1..5=J6"),
         DeclareLaunchArgument("record_rate", default_value="50.0"),
         DeclareLaunchArgument("output_file", default_value=""),
         DeclareLaunchArgument("auto_record", default_value="false"),
-        DeclareLaunchArgument("feedback_timeout_ms", default_value="5"),
+        DeclareLaunchArgument("feedback_timeout_ms", default_value="15"),
         DeclareLaunchArgument("max_consecutive_misses", default_value="10"),
         DeclareLaunchArgument("overwrite_existing", default_value="false"),
         Node(

@@ -102,7 +102,8 @@ int miraculous_co_sdo_read(MiraCoMaster *co, uint8_t node_id,
 {
     if (!co || !data || !data_len || *data_len == 0)
         return MRC_ERROR_INVALID_PARAM;
-    if (!co->recv_running) return MRC_ERROR_NOT_INIT;
+    if (!__atomic_load_n(&co->recv_running, __ATOMIC_ACQUIRE))
+        return MRC_ERROR_NOT_INIT;
 
     MiraCanCtx *can = miraculous_co_get_can(co);
     if (!can) return MRC_ERROR_NOT_INIT;
@@ -147,7 +148,8 @@ int miraculous_co_sdo_write(MiraCoMaster *co, uint8_t node_id,
 {
     if (!co || !data || data_len == 0 || data_len > 4)
         return MRC_ERROR_INVALID_PARAM;
-    if (!co->recv_running) return MRC_ERROR_NOT_INIT;
+    if (!__atomic_load_n(&co->recv_running, __ATOMIC_ACQUIRE))
+        return MRC_ERROR_NOT_INIT;
 
     MiraCanCtx *can = miraculous_co_get_can(co);
     if (!can) return MRC_ERROR_NOT_INIT;
@@ -231,6 +233,7 @@ int miraculous_co_sdo_wait_dispatch(MiraCoMaster *co, uint32_t can_id,
         pthread_mutex_unlock(&co->sdo_queue_lock);
 
         /* 尝试异步 SDO 任务匹配 */
+        pthread_mutex_lock(&co->motor_registry_lock);
         MiraMotor *mot = co->motor_by_node[node_id];
         if (mot) {
             uint16_t resp_idx = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
@@ -248,12 +251,14 @@ int miraculous_co_sdo_wait_dispatch(MiraCoMaster *co, uint32_t can_id,
                     if (cb)
                         cb(mot, tid, resp_idx, data[3],
                            MIRA_SDO_OK, data, len, usr);
+                    pthread_mutex_unlock(&co->motor_registry_lock);
                     return 0;
                 }
                 p = &(*p)->next;
             }
             pthread_mutex_unlock(&mot->sdo_async_lock);
         }
+        pthread_mutex_unlock(&co->motor_registry_lock);
         return -1;
     }
 
@@ -287,6 +292,7 @@ void miraculous_co_sdo_timeout_check(MiraCoMaster *co)
     clock_gettime(CLOCK_MONOTONIC, &now);
     uint64_t now_ms = now.tv_sec * 1000ULL + now.tv_nsec / 1000000ULL;
 
+    pthread_mutex_lock(&co->motor_registry_lock);
     for (int nid = 1; nid <= 127; nid++) {
         MiraMotor *mot = co->motor_by_node[nid];
         if (!mot) continue;
@@ -317,4 +323,5 @@ void miraculous_co_sdo_timeout_check(MiraCoMaster *co)
         }
         pthread_mutex_unlock(&mot->sdo_async_lock);
     }
+    pthread_mutex_unlock(&co->motor_registry_lock);
 }

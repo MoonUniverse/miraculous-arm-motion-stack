@@ -1,7 +1,7 @@
 # MoveIt 真机接入总体设计与测试基线
 
-更新日期：2026-08-04
-实现基线：`f298255 Integrate fail-closed MoveIt hardware path`
+更新日期：2026-08-05
+审查起点：`96a2282 Save real-arm hardware test profile`
 
 ## 1. 文档目的
 
@@ -33,7 +33,7 @@
 - `FollowJointTrajectory` 执行。
 - position command interface。
 - position/velocity state interfaces。
-- 100 Hz ros2_control 更新周期。
+- 50 Hz ros2_control 更新周期。
 - 手动 SYNC CSP。
 - 完整六轴 fresh TPDO2 等待。
 - 人工激活、人工停机和故障后进程重启。
@@ -59,16 +59,14 @@
 缺少标定、配置格式错误、反馈不新鲜或命令不安全时，系统必须拒绝继续，而不是
 使用默认值猜测。
 
-生产 profile 初始状态是：
+生产 profile 已填入待验收的暂定限位和看门狗，但初始状态仍是：
 
 ```yaml
 calibrated: false
-position_min: null
-position_max: null
 ```
 
-`moveit_real.launch.py` 使用 `require_calibrated=True` 加载它。因此未完成六轴限位
-标定时，launch 在创建硬件节点前就失败。
+`moveit_real.launch.py` 使用 `require_calibrated=True` 加载它。因此暂定数值尚未完成
+六轴真机复核时，launch 在创建硬件节点前就失败；不能仅为了启动而改成 `true`。
 
 ### 3.2 单一真机配置源
 
@@ -114,7 +112,7 @@ set_last_command_interface_value_as_state_on_activation: false
 
 任何 active 状态故障都会：
 
-1. best-effort arm-wide quick-stop；
+1. arm-wide quick-stop，并逐轴确认 `Quick Stop Active`；
 2. 故障锁存；
 3. ros2_control 返回 `ERROR`；
 4. 禁止当前进程重新 configure/activate；
@@ -242,7 +240,8 @@ deactivate arm_controller
   -> external electrical power-down procedure
 ```
 
-`on_shutdown()` 在硬件仍 active 时会先 quick-stop，再关闭 SDK。
+`on_shutdown()` 在硬件仍 active 时会先 quick-stop；最终 teardown 会逐轴命令并确认
+`Switch On Disabled`，再关闭 SDK 句柄。
 
 ### 6.5 生命周期状态图
 
@@ -291,7 +290,7 @@ MoveGroupInterface::execute(plan)
   -> drives latch six targets on the same SYNC edge
 ```
 
-### 7.3 100 Hz 控制周期
+### 7.3 50 Hz 控制周期
 
 controller manager 的逻辑周期是：
 
@@ -315,11 +314,14 @@ read
 4. `MiraculousSystem::write()` 再次检查每条命令：
    - finite；
    - 软件限位；
-   - fault 状态。
-5. `MiraculousArm::set_targets_rad()` 写完所有 RPDO target。
-6. 手动 SYNC 模式发送一次统一 SYNC。
-7. 同一次调用等待六轴 fresh TPDO2，最长 5 ms。
-8. 完整反馈到达后更新 snapshot，供下一周期 read 使用。
+   - fault 状态；
+   - 相对上一个已接受目标的单周期变化不超过 `0.005 rad`。
+5. `MiraculousArm::set_targets_rad()` 依次写 RPDO target；任一写失败立即停止后续
+   写入、抑制本周期 SYNC、quick-stop并隔离 SDK I/O。
+6. 只有六轴 RPDO 全部成功时，手动 SYNC 模式才发送一次统一 SYNC。
+7. 同一次调用等待六轴 fresh TPDO2，最长 15 ms。
+8. 完整反馈到达后更新 snapshot，并监督 commanded-actual 跟踪误差；超过
+   `0.05 rad` 达 3 个不同 fresh feedback 周期即停机。
 
 如果第 5～7 步任一失败，`write()` 返回 `ERROR` 并进入故障停机。
 
@@ -348,15 +350,15 @@ sequenceDiagram
     CM-->>CM: joint_state_broadcaster publishes /arm_joint_states
 ```
 
-### 8.1 5 ms manual feedback timeout
+### 8.1 15 ms manual feedback timeout
 
-`manual_feedback_timeout_ms=5` 表示 driver-owned SYNC 之后，等待六轴完整新一代
+`manual_feedback_timeout_ms=15` 表示 driver-owned SYNC 之后，等待六轴完整新一代
 TPDO2 的最大时间。
 
 它不是固定 sleep。最后一轴到达时 condition variable 会立即唤醒。
 
 超时表示“驱动没有在 deadline 前观察到完整 callback generation set”，不能单独
-证明 CAN 线上的物理响应一定超过 5 ms。问题也可能在：
+证明 CAN 线上的物理响应一定超过 15 ms。问题也可能在：
 
 - SDK 接收线程调度；
 - TPDO callback；
@@ -419,7 +421,7 @@ SDK RX thread 中的 EMCY callback 只做轻量操作：
 1. 设置 atomic latch；
 2. 记录错误信息。
 
-下一次 ros2_control read/write 周期观察 latch，执行一次 quick-stop。100 Hz 下
+下一次 ros2_control read/write 周期观察 latch，执行 quick-stop。50 Hz 下
 名义响应是一个控制周期量级，但它不是 safety-rated 硬实时急停，现场硬件急停
 仍是最终保护。
 
@@ -432,7 +434,9 @@ SDK RX thread 中的 EMCY callback 只做轻量操作：
 - command 超出 profile position limits；
 - SDK target write 失败；
 - manual SYNC 失败；
-- 5 ms 内未收齐 fresh TPDO2；
+- 15 ms 内未收齐 fresh TPDO2；
+- 单周期目标变化超过 `0.005 rad`；
+- commanded-actual 误差超过 `0.05 rad` 达 3 个 fresh 周期；
 - feedback snapshot 超过 30 ms；
 - feedback position/velocity 非有限；
 - actual position 越限；
@@ -447,7 +451,8 @@ failure detected
   -> MiraculousSystem::fail_safe_stop(reason)
   -> active = false
   -> fault_latched = true
-  -> quick_stop once
+  -> arm layer immediate quick-stop + per-axis state verification
+  -> system layer may make one best-effort retry
   -> read/write returns ERROR
   -> ros2_control error transition
   -> callback cleared
@@ -461,10 +466,12 @@ failure detected
 因为驱动器尚未进入 Operation Enabled，不把这类前置拒绝伪装成一次成功运行后的
 quick-stop。
 
-`stop_issued_` 保证同一锁存故障只调用一次 quick-stop，避免控制循环不断重发。
+`stop_issued_` 保证 ros2_control 上层不会在后续控制周期不断重发 quick-stop。对于
+RPDO/反馈事务内部故障，`MiraculousArm` 会先立即 quick-stop，上层允许再做一次
+best-effort 重试，避免底层某次停机写失败后完全没有第二次机会。
 
-如果 quick-stop SDK 命令本身失败，日志会明确打印 failure；此时必须依赖现场
-急停/断能，不能继续通过 ROS 重试。
+如果 quick-stop 命令或任何一轴的最终状态确认失败，日志会明确打印 failure；此时
+必须依赖现场急停/断能，不能继续通过 ROS 重试。
 
 ## 11. 配置传播
 
@@ -483,8 +490,16 @@ quick-stop。
 | `manual_feedback_timeout_ms` | 单次 SYNC fresh TPDO2 deadline |
 | `feedback_stale_timeout_ms` | active feedback watchdog |
 | `enable_emcy_monitor` | SDK EMCY callback |
+| `max_command_step_rad` | 写 RPDO 前的单周期目标跳变上限 |
+| `max_following_error_rad` | Driver commanded-actual 跟踪误差上限 |
+| `following_error_cycles` | 连续超差的 fresh feedback 周期数 |
 | `node_id` | CANopen node mapping |
 | `position_min/max` | driver-side command/actual-position guard |
+
+Driver 在任何 CAN 节点打开前校验 `miraculous_sdk_version()` 位于兼容范围
+`>=1.1.0,<2.0.0`。`1.1.0` 是本轮 PDO cache 并发、回调生命周期、总线 master
+引用以及非有限目标转换修复的最低契约；
+旧 `1.0.0` 库即使 ABI 可链接也会被拒绝启动。
 
 ### 11.2 profile 到 MoveIt
 
@@ -629,8 +644,11 @@ miraculous_driver/test/test_miraculous_system.cpp
 - write failure quick-stop 一次并锁存；
 - NaN command fail closed；
 - out-of-limit command 在 SDK write 前被拒绝；
+- 单周期 command jump 在 SDK write 前被拒绝；
+- following error 只按不同 feedback sequence 计数；
 - stale feedback quick-stop；
 - EMCY 在控制周期被观察并 quick-stop；
+- full-arm timer SYNC、关闭 EMCY 或关闭硬 watchdog 在打开硬件前被拒绝；
 - malformed list 在打开硬件前被拒绝；
 - `baudrate=0` 原样传播到 SDK，负数在打开硬件前被拒绝；
 - configure 时 actual position 越限被拒绝；
@@ -655,6 +673,10 @@ miraculous_driver/test/test_enable_csp.cpp
 - manual target cycle；
 - configured feedback deadline；
 - incomplete TPDO generation set；
+- 运行时某轴 RPDO failure 抑制本周期 SYNC，并停止后续轴写入；
+- velocity read failure 不会发布伪造的 `0 rad/s`；
+- 单周期跳变与连续 following error 触发隔离和 quick-stop；
+- quick-stop、disable 和 disable-voltage 逐轴确认最终 CiA402 状态；
 - seed write failure rollback；
 - 中间轴 enable failure；
 - rollback failure 仍继续处理其他轴；
@@ -706,17 +728,21 @@ colcon test-result \
   --verbose
 ```
 
-实现基线结果：
+提交 `96a2282` 的历史实现基线结果：
 
 ```text
 36 tests, 0 errors, 0 failures, 0 skipped
 ```
 
-2026-08-04 增加 `baudrate=0` 契约回归后，`miraculous_driver` 包级结果：
+2026-08-04 增加 `baudrate=0` 契约回归后，该历史提交的 `miraculous_driver` 包级结果：
 
 ```text
 40 tests, 0 errors, 0 failures, 0 skipped
 ```
+
+本轮安全修复增加了 Driver/SDK 代码与测试，上述数字不能作为当前工作树结果。必须在
+ROS 2 Humble 板上工作区重新执行本节的 clean build、`colcon test` 与
+`colcon test-result --verbose`，保存新的零失败证据后才能进入真机激活。
 
 real xacro 还需生成 URDF 并执行：
 
@@ -834,7 +860,7 @@ fake 成功绝不能替代真机分阶段验收。
 - CAN interface：
 
   ```bash
-  ip -details link show can0
+  ip -details link show can1
   ```
 
 - hardware/controller state：
@@ -863,16 +889,16 @@ test_evidence/YYYY-MM-DD_moveit_real_<git-short-sha>/
 
 ## 16. 实现基线和后续提交规则
 
-第一轮实现基线：
+本轮审查起点：
 
 ```text
-f298255 Integrate fail-closed MoveIt hardware path
+96a2282 Save real-arm hardware test profile
 ```
 
 后续测试开始前确认：
 
 ```bash
-git show --stat --oneline f298255
+git show --stat --oneline 96a2282
 git status --short --branch
 ```
 

@@ -43,6 +43,9 @@ class RealArmProfile:
     manual_feedback_timeout_ms: int
     feedback_stale_timeout_ms: int
     enable_emcy_monitor: bool
+    max_command_step_rad: float
+    max_following_error_rad: float
+    following_error_cycles: int
     joints: Mapping[str, RealJointConfig]
 
     def csv(self, field: str) -> str:
@@ -179,6 +182,9 @@ def load_real_arm_profile(
         "manual_feedback_timeout_ms",
         "feedback_stale_timeout_ms",
         "enable_emcy_monitor",
+        "max_command_step_rad",
+        "max_following_error_rad",
+        "following_error_cycles",
     }
     if set(hardware) != expected_hardware:
         missing = sorted(expected_hardware - set(hardware))
@@ -260,15 +266,33 @@ def load_real_arm_profile(
     stale_timeout = _integer(
         hardware["feedback_stale_timeout_ms"], "hardware.feedback_stale_timeout_ms"
     )
-    if baudrate < 0 or encoder_bw <= 0 or sync_period_us < 0:
+    following_error_cycles = _integer(
+        hardware["following_error_cycles"], "hardware.following_error_cycles"
+    )
+    if baudrate < 0 or encoder_bw <= 0 or encoder_bw > 31 or sync_period_us < 0:
         raise ValueError(
-            "baudrate/sync_period_us must be non-negative and encoder_bw positive"
+            "baudrate/sync_period_us must be non-negative and encoder_bw in [1, 31]"
+        )
+    if sync_period_us != 0:
+        raise ValueError(
+            "hardware.sync_period_us must be 0 for the fail-closed real-arm "
+            "MoveIt path; timer SYNC is not certified for six-axis target transactions"
         )
     if manual_timeout <= 0 or stale_timeout <= manual_timeout:
         raise ValueError(
             "manual_feedback_timeout_ms must be positive and "
             "feedback_stale_timeout_ms must be greater than it"
         )
+    if not _bool(hardware["enable_emcy_monitor"], "hardware.enable_emcy_monitor"):
+        raise ValueError("hardware.enable_emcy_monitor must be true for real MoveIt")
+    max_command_step = _positive(
+        hardware["max_command_step_rad"], "hardware.max_command_step_rad"
+    )
+    max_following_error = _positive(
+        hardware["max_following_error_rad"], "hardware.max_following_error_rad"
+    )
+    if following_error_cycles <= 0:
+        raise ValueError("hardware.following_error_cycles must be greater than zero")
 
     return RealArmProfile(
         calibrated=calibrated,
@@ -289,5 +313,8 @@ def load_real_arm_profile(
         enable_emcy_monitor=_bool(
             hardware["enable_emcy_monitor"], "hardware.enable_emcy_monitor"
         ),
+        max_command_step_rad=max_command_step,
+        max_following_error_rad=max_following_error,
+        following_error_cycles=following_error_cycles,
         joints=parsed_joints,
     )

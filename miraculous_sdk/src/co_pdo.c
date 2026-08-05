@@ -187,15 +187,24 @@ typedef struct {
 typedef struct PdoCtx_t {
     TpdoEntry_t entries[MAX_TPDO_CBS];
     int         count;
+    pthread_mutex_t lock;
 } PdoCtx_t;
 
 PdoCtx_t* co_pdo_create(void)
 {
-    return calloc(1, sizeof(PdoCtx_t));
+    PdoCtx_t *ctx = calloc(1, sizeof(PdoCtx_t));
+    if (!ctx) return NULL;
+    if (pthread_mutex_init(&ctx->lock, NULL) != 0) {
+        free(ctx);
+        return NULL;
+    }
+    return ctx;
 }
 
 void co_pdo_destroy(PdoCtx_t *ctx)
 {
+    if (!ctx) return;
+    pthread_mutex_destroy(&ctx->lock);
     free(ctx);
 }
 
@@ -206,7 +215,13 @@ int miraculous_co_pdo_set_tpdo_callback(MiraCoMaster *co,
                                          void *user_data)
 {
     PdoCtx_t *pdo = miraculous_co_get_pdo(co);
-    if (!pdo || pdo->count >= MAX_TPDO_CBS) return MRC_ERROR_OUT_OF_MEMORY;
+    if (!pdo || !cb) return MRC_ERROR_INVALID_PARAM;
+
+    pthread_mutex_lock(&pdo->lock);
+    if (pdo->count >= MAX_TPDO_CBS) {
+        pthread_mutex_unlock(&pdo->lock);
+        return MRC_ERROR_OUT_OF_MEMORY;
+    }
 
     TpdoEntry_t *e = &pdo->entries[pdo->count++];
     e->node_id   = node_id;
@@ -215,6 +230,35 @@ int miraculous_co_pdo_set_tpdo_callback(MiraCoMaster *co,
     e->callback  = cb;
     e->user_data = user_data;
 
+    pthread_mutex_unlock(&pdo->lock);
+    return MRC_SUCCESS;
+}
+
+int miraculous_co_pdo_remove_tpdo_callbacks(MiraCoMaster *co,
+                                             uint8_t node_id,
+                                             void *user_data)
+{
+    PdoCtx_t *pdo = miraculous_co_get_pdo(co);
+    if (!pdo || !user_data) return MRC_ERROR_INVALID_PARAM;
+
+    pthread_mutex_lock(&pdo->lock);
+    int write_index = 0;
+    for (int read_index = 0; read_index < pdo->count; read_index++) {
+        TpdoEntry_t *entry = &pdo->entries[read_index];
+        if (entry->node_id == node_id && entry->user_data == user_data) {
+            continue;
+        }
+        if (write_index != read_index) {
+            pdo->entries[write_index] = *entry;
+        }
+        write_index++;
+    }
+    if (write_index < pdo->count) {
+        memset(&pdo->entries[write_index], 0,
+               (size_t)(pdo->count - write_index) * sizeof(TpdoEntry_t));
+    }
+    pdo->count = write_index;
+    pthread_mutex_unlock(&pdo->lock);
     return MRC_SUCCESS;
 }
 
@@ -222,6 +266,10 @@ void co_pdo_handle_tpdo(PdoCtx_t *ctx, uint32_t can_id,
                          const uint8_t *data, uint8_t len)
 {
     if (!ctx) return;
+    /* Keep the registry stable through callback completion.  Removal during
+     * motor close takes the same lock, so no callback can retain a freed
+     * MiraMotor user_data pointer. */
+    pthread_mutex_lock(&ctx->lock);
     for (int i = 0; i < ctx->count; i++) {
         if (ctx->entries[i].cob_id == can_id
             && ctx->entries[i].callback) {
@@ -232,4 +280,5 @@ void co_pdo_handle_tpdo(PdoCtx_t *ctx, uint32_t can_id,
                 ctx->entries[i].user_data);
         }
     }
+    pthread_mutex_unlock(&ctx->lock);
 }

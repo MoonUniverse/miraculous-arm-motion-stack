@@ -26,7 +26,8 @@ export ARM_LIMIT_MAX="MAX_J1,MAX_J2,MAX_J3,MAX_J4,MAX_J5,MAX_J6"
 
 - SDK `_ex` position APIs already use joint/load-side radians. The driver forwards `encoder_bw` / `reduction_ratio` hardware params to the SDK (defaults 19 / 100.0 = SDK defaults); only change them for a different motor model.
 - `ARM_LIMIT_MIN` / `ARM_LIMIT_MAX`: conservative software limits in radians.
-- `0.0,0.0` for a joint disables clamping and should only be used for passive readout.
+- `0.0,0.0` may represent an unconfigured limit only in passive readout. Active
+  playback and trajectory nodes reject missing or unordered limits.
 - `node_ids` and `joint_indices` must have the same length. `joint_indices` uses ROS slots `0=J1 ... 5=J6`.
 
 Examples:
@@ -44,11 +45,12 @@ node_ids:=3 joint_indices:=2 test_joint:=2
 
 ## 3. Bring Up CAN
 
+The tested baseline is `can1` with `baudrate:=0`, meaning the SDK preserves the
+existing SocketCAN configuration. Configure the interface through the approved
+bench procedure, then verify it before starting ROS:
+
 ```bash
-sudo ip link set can0 down || true
-sudo ip link set can0 type can bitrate 1000000
-sudo ip link set can0 up
-ip -details link show can0
+ip -details link show can1
 ```
 
 ## 4. Read-Only Encoder Check
@@ -64,11 +66,12 @@ cd /home/alienware/Documents/PersonalProject/ros2_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver teach.launch.py \
-  can_interface:=can0 \
+  can_interface:=can1 \
+  baudrate:=0 \
   node_ids:=1,2,3,4,5,6 \
   joint_indices:=0,1,2,3,4,5 \
   record_rate:=50.0 \
-  feedback_timeout_ms:=2 \
+  feedback_timeout_ms:=15 \
   max_consecutive_misses:=10 \
   output_file:=/tmp/teach_v2.csv \
   auto_record:=false
@@ -115,7 +118,8 @@ cd /home/alienware/Documents/PersonalProject/ros2_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py \
-  can_interface:=can0 \
+  can_interface:=can1 \
+  baudrate:=0 \
   node_ids:=1 \
   joint_indices:=0 \
   position_min:="$ARM_LIMIT_MIN" \
@@ -123,6 +127,9 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver trajectory_test.launch.py
   test_joint:=0 \
   amplitude:=0.03 \
   period:=6.0 \
+  frequency:=50.0 \
+  sync_period_us:=0 \
+  feedback_timeout_ms:=15 \
   duration:=3.0
 ```
 
@@ -139,6 +146,8 @@ Pass criteria:
 - Only the selected joint follows the command; other joints hold current position.
 - The test auto-stops after `duration` and disables the motors.
 - The CSV shows finite command/actual/error values with no large discontinuity.
+- A target step over `0.005 rad` or tracking error over `0.05 rad` for three
+  fresh feedback cycles stops and quarantines the test.
 - No EMCY/fault messages appear.
 
 Repeat one joint at a time: `test_joint:=1` through `test_joint:=5`.

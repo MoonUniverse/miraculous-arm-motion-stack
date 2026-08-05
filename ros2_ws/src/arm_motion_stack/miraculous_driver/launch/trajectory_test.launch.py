@@ -26,6 +26,10 @@ def generate_launch_description():
     duration = LaunchConfiguration("duration")
     output_file = LaunchConfiguration("output_file")
     settle_time = LaunchConfiguration("settle_time")
+    feedback_timeout_ms = LaunchConfiguration("feedback_timeout_ms")
+    max_command_step_rad = LaunchConfiguration("max_command_step_rad")
+    max_following_error_rad = LaunchConfiguration("max_following_error_rad")
+    following_error_cycles = LaunchConfiguration("following_error_cycles")
     enable_emcy_monitor = LaunchConfiguration("enable_emcy_monitor")
 
     arm_description_share = get_package_share_directory("arm_description")
@@ -61,26 +65,30 @@ def generate_launch_description():
             "duration": duration,
             "output_file": output_file,
             "settle_time": settle_time,
+            "feedback_timeout_ms": feedback_timeout_ms,
+            "max_command_step_rad": max_command_step_rad,
+            "max_following_error_rad": max_following_error_rad,
+            "following_error_cycles": following_error_cycles,
             "enable_emcy_monitor": ParameterValue(enable_emcy_monitor, value_type=bool),
         }],
     )
 
     return LaunchDescription([
         DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
-        DeclareLaunchArgument("can_interface", default_value="can0"),
-        DeclareLaunchArgument("baudrate", default_value="1000"),
+        DeclareLaunchArgument("can_interface", default_value="can1"),
+        DeclareLaunchArgument("baudrate", default_value="0"),
         DeclareLaunchArgument("node_ids", default_value="1,2,3,4,5,6"),
         DeclareLaunchArgument("joint_indices", default_value="0,1,2,3,4,5",
                               description="ROS joint indices for node_ids: 0=J1..5=J6"),
         DeclareLaunchArgument("position_min", default_value="0.0,0.0,0.0,0.0,0.0,0.0"),
         DeclareLaunchArgument("position_max", default_value="0.0,0.0,0.0,0.0,0.0,0.0"),
-        DeclareLaunchArgument("sync_period_us", default_value="10000",
-                              description="CSP SYNC period [us]. 0=manual, >0=SDK timer"),
+        DeclareLaunchArgument("sync_period_us", default_value="0",
+                              description="Must be 0: driver-owned Manual SYNC"),
         DeclareLaunchArgument("amplitude", default_value="0.03",
                               description="Sine/cosine amplitude [rad]"),
         DeclareLaunchArgument("period", default_value="6.0",
                               description="Sine/cosine period [s]"),
-        DeclareLaunchArgument("frequency", default_value="100.0",
+        DeclareLaunchArgument("frequency", default_value="50.0",
                               description="Command update rate [Hz]"),
         DeclareLaunchArgument("waveform", default_value="sin",
                               description="Waveform: 'sin' or 'cos'"),
@@ -95,6 +103,14 @@ def generate_launch_description():
                               description="CSV output path (empty=auto timestamp)"),
         DeclareLaunchArgument("settle_time", default_value="0.5",
                               description="Settling time before test starts [s]"),
+        DeclareLaunchArgument("feedback_timeout_ms", default_value="15",
+                              description="Fresh TPDO2 deadline after Manual SYNC"),
+        DeclareLaunchArgument("max_command_step_rad", default_value="0.005",
+                              description="Maximum accepted per-cycle joint target change"),
+        DeclareLaunchArgument("max_following_error_rad", default_value="0.05",
+                              description="Hardware-layer commanded/actual error limit"),
+        DeclareLaunchArgument("following_error_cycles", default_value="3",
+                              description="Fresh feedback cycles allowed above the error limit"),
         DeclareLaunchArgument("enable_emcy_monitor", default_value="true",
                               description="Register the SDK's dedicated EMCY callback "
                                           "(motor fault reporting)"),

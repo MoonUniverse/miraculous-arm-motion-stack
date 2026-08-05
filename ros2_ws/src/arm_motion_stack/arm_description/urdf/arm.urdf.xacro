@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ARM">
   <xacro:arg name="hardware_type" default="fake"/>
-  <xacro:arg name="can_interface" default="can0"/>
-  <xacro:arg name="baudrate" default="1000"/>
+  <xacro:arg name="can_interface" default="can1"/>
+  <xacro:arg name="baudrate" default="0"/>
   <xacro:arg name="encoder_bw" default="19"/>
   <xacro:arg name="reduction_ratio" default="100.0"/>
   <xacro:arg name="node_ids" default="1,2,3,4,5,6"/>
@@ -10,11 +10,14 @@
   <xacro:arg name="position_min" default="0.0,0.0,0.0,0.0,0.0,0.0"/>
   <xacro:arg name="position_max" default="0.0,0.0,0.0,0.0,0.0,0.0"/>
   <xacro:arg name="sync_period_us" default="0"/>
-  <xacro:arg name="read_rate_hz" default="100.0"/>
+  <xacro:arg name="read_rate_hz" default="50.0"/>
   <xacro:arg name="state_poll_rate_hz" default="0.0"/>
-  <xacro:arg name="manual_feedback_timeout_ms" default="5"/>
+  <xacro:arg name="manual_feedback_timeout_ms" default="15"/>
   <xacro:arg name="feedback_stale_timeout_ms" default="30"/>
   <xacro:arg name="enable_emcy_monitor" default="true"/>
+  <xacro:arg name="max_command_step_rad" default="0.005"/>
+  <xacro:arg name="max_following_error_rad" default="0.05"/>
+  <xacro:arg name="following_error_cycles" default="3"/>
   <xacro:arg name="require_full_arm" default="false"/>
   <xacro:arg name="require_position_limits" default="false"/>
 
@@ -48,6 +51,9 @@
     manual_feedback_timeout_ms="$(arg manual_feedback_timeout_ms)"
     feedback_stale_timeout_ms="$(arg feedback_stale_timeout_ms)"
     enable_emcy_monitor="$(arg enable_emcy_monitor)"
+    max_command_step_rad="$(arg max_command_step_rad)"
+    max_following_error_rad="$(arg max_following_error_rad)"
+    following_error_cycles="$(arg following_error_cycles)"
     require_full_arm="$(arg require_full_arm)"
     require_position_limits="$(arg require_position_limits)"/>
 </robot>

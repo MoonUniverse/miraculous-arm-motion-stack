@@ -6,7 +6,7 @@
 # 输出目录由 OUTPUT_DIRECTORY 控制, 建议用 build/doxygen_output
 #
 PROJECT_NAME           = "Miraculous SDK"
-PROJECT_NUMBER         = 1.0.0
+PROJECT_NUMBER         = 1.1.0
 PROJECT_BRIEF          = "miraculous 电机驱动 CANopen-CiA402 SDK"
 OUTPUT_DIRECTORY       = build/doxygen_output
 OUTPUT_LANGUAGE        = Chinese

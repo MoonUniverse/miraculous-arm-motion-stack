@@ -66,11 +66,12 @@ int miraculous_motor_csp_set_target(MiraMotor *motor, int32_t target_pos)
 
     /* 仅通过 PDO 发送 RPDO2 (位置) */
     uint32_t cob2 = CO_COB_RPDO2 + motor->node_id;
+    const uint32_t raw = (uint32_t)target_pos;
     uint8_t pos_data[4];
-    pos_data[0] = (uint8_t)(target_pos & 0xFF);
-    pos_data[1] = (uint8_t)((target_pos >> 8) & 0xFF);
-    pos_data[2] = (uint8_t)((target_pos >> 16) & 0xFF);
-    pos_data[3] = (uint8_t)((target_pos >> 24) & 0xFF);
+    pos_data[0] = (uint8_t)(raw & 0xFFU);
+    pos_data[1] = (uint8_t)((raw >> 8) & 0xFFU);
+    pos_data[2] = (uint8_t)((raw >> 16) & 0xFFU);
+    pos_data[3] = (uint8_t)((raw >> 24) & 0xFFU);
     ret = miraculous_co_pdo_send(motor->co, 2, cob2, pos_data, 4);
     if (ret < 0)
         return ret;
@@ -83,11 +84,9 @@ int miraculous_motor_csp_set_target_ex(MiraMotor *motor, float target_pos, PosUn
     if (!motor) return MRC_ERROR_INVALID_PARAM;
 
     int32_t pulses;
-    if (unit == POS_UNIT_RADIAN) {
-        pulses = RAD_TO_POS(target_pos, motor->encoder_bw);
-    } else {
-        pulses = DEG_TO_POS(target_pos, motor->encoder_bw);
-    }
+    int ret = miraculous_position_to_counts(
+        target_pos, unit, motor->encoder_bw, &pulses);
+    if (ret < 0) return ret;
 
     return miraculous_motor_csp_set_target(motor, pulses);
 }

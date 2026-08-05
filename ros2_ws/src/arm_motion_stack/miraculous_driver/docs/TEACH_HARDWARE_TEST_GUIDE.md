@@ -1,7 +1,7 @@
 # Miraculous Arm 真机示教录制与回放测试指南
 
 本文档用于 `teach_record_node` 和 `playback_node` 的真机分阶段验证。文档基于
-`088223a` 版本的驱动行为编写，测试对象是：
+当前 Driver/SDK 源码的 fail-closed 行为编写，测试对象是：
 
 1. 电机失能、机械臂可拖动时录制同步关节位置。
 2. 检查 V2 CSV 的完整性和关节映射。
@@ -50,7 +50,7 @@ generation 和条件变量等待该线程完成回调；不再调用 `miraculous
 启动 `playback.launch.py` 只会初始化驱动和 CSP 通信，不会立即进入
 `Operation Enabled`。收到 `/playback/play` 后才执行：
 
-launch 启动后，后台读线程会以当前固定的 100 Hz 发送只读反馈所需的手动 SYNC。
+launch 启动后，后台读线程会以当前固定的 50 Hz 发送只读反馈所需的手动 SYNC。
 这时可能看到周期性 `0x080`，但不应看到周期性 CSP RPDO2 target，也不应有主动运动。
 
 1. 重新加载并校验 CSV。
@@ -80,6 +80,10 @@ disable voltage，不允许把部分使能当作整体成功。
 - 然后只发送一帧广播 SYNC。
 - 所有电机在同一个 SYNC 边沿锁存各自 target。
 - 反馈采样同样是一帧广播 SYNC 后等待所有轴的新 TPDO2。
+- 任一 RPDO target 写失败时立即停止后续写入，且本周期不发送 SYNC；全臂进入
+  quick-stop 与 SDK I/O 隔离状态。
+- 主动命令默认限制单周期变化不超过 `0.005 rad`；commanded-actual 连续 3 个新鲜
+  反馈周期超过 `0.05 rad` 时触发全臂 quick-stop。这三个值仍需真机标定后冻结。
 
 不是每个电机各发送一帧 SYNC。
 
@@ -243,7 +247,7 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver teach.launch.py \
   node_ids:=1 \
   joint_indices:=0 \
   record_rate:=20.0 \
-  feedback_timeout_ms:=5 \
+  feedback_timeout_ms:=15 \
   max_consecutive_misses:=10 \
   output_file:="$TEACH_CSV" \
   auto_record:=false \
@@ -467,8 +471,8 @@ export J1_MAX=0.5
 - CSV 中 J1 的所有点都在该范围内。
 - 该范围没有跨越机械干涉区。
 
-`position_min=0.0` 且 `position_max=0.0` 会禁用该关节的软件限位。主动真机回放不应
-使用这种配置。
+`position_min=0.0` 且 `position_max=0.0` 是占位值。主动真机回放会直接拒绝这种配置，
+必须为每个活动关节填写有限且满足 `min < max` 的真实安全限位。
 
 ### 9.2 启动 playback
 
@@ -495,7 +499,7 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver playback.launch.py \
   approach_rate_hz:=50.0 \
   approach_min_duration_s:=1.0 \
   start_tolerance_rad:=0.003 \
-  feedback_timeout_ms:=10
+  feedback_timeout_ms:=15
 ```
 
 `speed_scale:=0.25` 表示按原轨迹四倍时间慢速回放。代码使用：
@@ -633,7 +637,7 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver teach.launch.py \
   node_ids:=1,2 \
   joint_indices:=0,1 \
   record_rate:=20.0 \
-  feedback_timeout_ms:=5 \
+  feedback_timeout_ms:=15 \
   max_consecutive_misses:=10 \
   output_file:="$TEACH_CSV" \
   auto_record:=false \
@@ -674,7 +678,7 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver playback.launch.py \
   approach_rate_hz:=50.0 \
   approach_min_duration_s:=1.5 \
   start_tolerance_rad:=0.003 \
-  feedback_timeout_ms:=10
+  feedback_timeout_ms:=15
 ```
 
 开始：
@@ -712,7 +716,7 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver teach.launch.py \
   node_ids:=1,3,5 \
   joint_indices:=0,2,4 \
   record_rate:=20.0 \
-  feedback_timeout_ms:=5 \
+  feedback_timeout_ms:=15 \
   max_consecutive_misses:=10 \
   output_file:="$TEACH_CSV" \
   auto_record:=false \
@@ -742,7 +746,7 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver playback.launch.py \
   approach_rate_hz:=50.0 \
   approach_min_duration_s:=1.5 \
   start_tolerance_rad:=0.003 \
-  feedback_timeout_ms:=10
+  feedback_timeout_ms:=15
 ```
 
 这里三项限位按活动关节顺序对应 J1、J3、J5。也可以传六项完整 J1 至 J6 限位，
@@ -773,7 +777,7 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver teach.launch.py \
   node_ids:=1,2,3,4,5,6 \
   joint_indices:=0,1,2,3,4,5 \
   record_rate:=50.0 \
-  feedback_timeout_ms:=5 \
+  feedback_timeout_ms:=15 \
   max_consecutive_misses:=10 \
   output_file:="$TEACH_CSV" \
   auto_record:=false \
@@ -797,7 +801,7 @@ ROS_LOG_DIR=/tmp/ros-log ros2 launch miraculous_driver playback.launch.py \
   approach_rate_hz:=50.0 \
   approach_min_duration_s:=2.0 \
   start_tolerance_rad:=0.003 \
-  feedback_timeout_ms:=10
+  feedback_timeout_ms:=15
 ```
 
 首轮六轴示教动作要短、小、慢，避免同时做大幅度关节运动。

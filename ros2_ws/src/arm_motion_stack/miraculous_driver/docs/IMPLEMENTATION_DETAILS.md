@@ -29,14 +29,15 @@ ros2_ws/src/arm_motion_stack/miraculous_driver/docs/REAL_HARDWARE_BRINGUP.md
 - 速度反馈改用 `miraculous_motor_get_velocity_ex(..., VEL_SIDE_LOAD, VEL_UNIT_RAD_S)`。
 - 手动 SYNC 改用 `miraculous_motor_sync_send()`，不再直接发送 raw CAN `0x080`。
 - `node_ids` / `joint_indices` 支持只配置已安装关节；`joint_indices` 使用 `0=J1 ... 5=J6`。
-- `position_min` / `position_max` 可传入 1 个、已装关节数量 N 个、或 6 轴全量软件限位；某一轴 `max <= min` 时该轴不启用 clamp。
+- `position_min` / `position_max` 可传入 1 个、已装关节数量 N 个、或 6 轴全量软件限位；
+  底层可表示未启用限位，但所有主动真机入口均拒绝 `max <= min`。
 - 轨迹测试默认保持第一阶段保守值：`amplitude:=0.03`、`period:=6.0`、`duration:=3.0`。
 
 ### 硬件拓扑
 
-- 6 个 MiraMotor 电机挂在单条 CAN 总线 (`can0`)
+- 6 个 MiraMotor 电机挂在单条 CAN 总线（当前现场基线为 `can1`）
 - CANopen 节点 ID 1–6 对应 J1–J6
-- 波特率 1000 kbps (CiA402 标准)
+- SocketCAN 预先配置为 1 Mbps；Driver 使用 `baudrate=0` 保持接口现有配置
 
 ### SDK 版本
 
@@ -45,6 +46,10 @@ ros2_ws/src/arm_motion_stack/miraculous_driver/docs/REAL_HARDWARE_BRINGUP.md
 （x86-64 / aarch64 均可在目标机上编译），产物在 `miraculous_sdk/build/lib/`。
 其他位置的 SDK 通过 `-DMIRACULOUS_SDK_DIR=/abs/path/to/sdk` 显式指定
 （支持源码仓布局 `build/lib/` 或安装布局 `lib/`）。
+
+本轮安全契约从 SDK `1.1.0` 开始。Driver 在打开任何 CAN 节点前调用
+`miraculous_sdk_version()` 并要求兼容版本 `>=1.1.0,<2.0.0`；如果工作区残留旧 `1.0.0`
+动态库，会 fail closed 并要求先从当前 SDK 源码重建，避免新头文件配旧实现。
 
 #### SDK API 升级 (2026-06-25)
 
@@ -133,7 +138,7 @@ CAN 总线 → 6 个电机
 ### 3.2 主动控制后台读取线程
 
 ```
-MiraculousArm::read_loop() [独立线程, 100Hz]
+MiraculousArm::read_loop() [独立线程, 50 Hz]
     │  循环:
     │    1. 未使能时记录各节点 TPDO2 generation 并发送一帧 SYNC
     │    2. condition_variable 等待 SDK 接收线程送回完整的新 TPDO2 组
@@ -227,8 +232,8 @@ shutdown()       stop_read_thread → 注销 TPDO/EMCY 回调 → (timer 模式:
 | `on_activate` | arm_->enable_csp() → 用编码器实时位置重新 seed states/commands (失败则 ERROR 并 disable) → active_=true |
 | `on_deactivate` | active_=false → arm_->disable() |
 | `on_cleanup` | arm_->shutdown() → arm_.reset() |
-| `read` | 拷贝缓存 → position_states_/velocity_states_, 检测 fault |
-| `write` | set_targets_rad(position_commands_) |
+| `read` | 验证 feedback sequence/年龄/有限性/限位/跟随误差，再更新 state；失败返回 `ERROR` |
+| `write` | 验证有限性/限位/单周期步长，再执行目标事务；失败返回 `ERROR` 并锁存故障 |
 
 ---
 
@@ -250,14 +255,19 @@ struct JointConfig {
 };
 
 struct ArmConfig {
-    std::string can_interface = "can0";
-    CiaBaudrate_t baudrate = CIA_BAUDRATE_1000;
+    std::string can_interface = "can1";
+    CiaBaudrate_t baudrate = static_cast<CiaBaudrate_t>(0); // 保持 SocketCAN 配置
     std::vector<JointConfig> joints;  // 已安装关节, 1..6 个
     uint32_t sync_period_us = 0;     // 0 = 手动 SYNC; 非 0 = 共享 SDK 定时器
     uint8_t encoder_bw = 19;         // 编码器位宽 (2^bw counts/rev), SDK 默认
     double reduction_ratio = 100.0;  // 减速比 (负载侧速度换算), SDK 默认
-    double read_rate_hz = 100.0;
+    double read_rate_hz = 50.0;
     double state_poll_rate_hz = 0.0; // 0 = 不轮询 0x6041 状态字
+    uint32_t manual_feedback_timeout_ms = 15;
+    double max_command_step_rad = 0.0;       // 0 = 通用底层默认关闭
+    double max_following_error_rad = 0.0;    // 与 cycles 同时启用
+    uint32_t following_error_cycles = 0;
+    bool enable_emcy_monitor = true;
 };
 
 class MiraculousArm {
@@ -269,14 +279,16 @@ class MiraculousArm {
     // PDS 状态机
     bool enable_csp();
     bool enable();
-    void disable();
-    void quick_stop();
+    bool disable();       // 命令并确认所有轴进入 Switched On
+    bool quick_stop();    // 命令并确认所有轴进入 Quick Stop Active
+    bool disable_voltage();
     bool fault_reset();
 
     // 读取 (线程安全, 非阻塞)
     bool get_positions_rad(std::array<double, 6>& pos) const;
     bool get_velocities_rad(std::array<double, 6>& vel) const;
     bool get_states(std::array<Cia402State_t, 6>& states) const;
+    bool get_feedback_snapshot(FeedbackSnapshot& snapshot) const;
     bool has_fault() const;
 
     // CSP 写入
@@ -323,31 +335,35 @@ class MiraculousArm {
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `can_interface` | `can0` | SocketCAN 接口名 |
-| `baudrate` | `1000` | CAN 波特率 (kbps) |
+| `can_interface` | `can1` | 当前已验证的 SocketCAN 接口名 |
+| `baudrate` | `0` | 保持 SocketCAN 当前配置，不由 SDK 重配 |
 | `node_ids` | `1,2,3,4,5,6` | 已安装电机的 CANopen 节点 ID |
 | `joint_indices` | `0,1,2,3,4,5` | 每个 `node_id` 对应的 ROS 关节槽位, `0=J1 ... 5=J6` |
-| `position_min` | `0.0,...` | 软件下限 [rad], 可填 1 个、已装关节数量 N 个、或 6 个全量值 |
-| `position_max` | `0.0,...` | 软件上限 [rad], 可填 1 个、已装关节数量 N 个、或 6 个全量值 |
+| `position_min` | `0.0,...` | 占位；主动真机入口要求替换为真实有限下限 [rad] |
+| `position_max` | `0.0,...` | 占位；主动真机入口要求替换为真实有限上限 [rad] |
 | `sync_period_us` | `0` | 0=手动 SYNC, 非 0=共享 SDK 定时器周期 [us] |
 | `encoder_bw` | `19` | 编码器位宽 (2^bw counts/rev), 范围 1..31, 默认即 SDK 默认 |
 | `reduction_ratio` | `100.0` | 减速比 (>0), 默认即 SDK 默认, 仅换电机型号时修改 |
-| `read_rate_hz` | `100.0` | 后台读取线程频率 |
+| `read_rate_hz` | `50.0` | 后台读取线程频率 |
 | `state_poll_rate_hz` | `0.0` | 状态字 SDO 轮询频率，0=关闭；轨迹跟踪默认关闭 |
+| `manual_feedback_timeout_ms` | `15` | Manual SYNC 后完整 fresh TPDO2 deadline [ms] |
+| `max_command_step_rad` | `0.005` | 主动控制单周期最大目标变化 [rad] |
+| `max_following_error_rad` | `0.05` | Driver 层最大 commanded-actual 误差 [rad] |
+| `following_error_cycles` | `3` | 连续超差的新鲜反馈周期数 |
 
 ### 5.2 teach_record_node 参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `can_interface` | `can0` | CAN 接口 |
-| `baudrate` | `1000` | 波特率 |
+| `can_interface` | `can1` | CAN 接口 |
+| `baudrate` | `0` | 保持 SocketCAN 当前配置 |
 | `node_ids` | `1,2,3,4,5,6` | 已安装电机节点 ID |
 | `joint_indices` | `0,1,2,3,4,5` | 每个 `node_id` 对应的 ROS 关节槽位 |
 | `joint_states_topic` | `/arm_joint_states` | 发布话题 |
 | `record_rate` | `50.0` | 录制频率 (Hz) |
 | `output_file` | `""` (自动时间戳) | CSV 输出路径 |
 | `auto_record` | `false` | 启动即开始录制 |
-| `feedback_timeout_ms` | `5` | 每次 SYNC 等待全部配置节点新 TPDO2 的超时 |
+| `feedback_timeout_ms` | `15` | 每次 SYNC 等待全部配置节点新 TPDO2 的超时 |
 | `max_consecutive_misses` | `10` | 连续超时达到该值时终止当前录制 |
 | `overwrite_existing` | `false` | 是否允许覆盖显式 `output_file` |
 
@@ -355,21 +371,24 @@ class MiraculousArm {
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `can_interface` | `can0` | CAN 接口 |
-| `baudrate` | `1000` | 波特率 |
+| `can_interface` | `can1` | CAN 接口 |
+| `baudrate` | `0` | 保持 SocketCAN 当前配置 |
 | `node_ids` | `1,2,3,4,5,6` | 已安装电机节点 ID |
 | `joint_indices` | `0,1,2,3,4,5` | 每个 `node_id` 对应的 ROS 关节槽位 |
-| `position_min` | `0.0,...` | 软件下限 [rad], 可填 1 个、已装关节数量 N 个、或 6 个全量值 |
-| `position_max` | `0.0,...` | 软件上限 [rad], 可填 1 个、已装关节数量 N 个、或 6 个全量值 |
+| `position_min` | `0.0,...` | 占位；主动回放会拒绝，必须填写真实下限 [rad] |
+| `position_max` | `0.0,...` | 占位；主动回放会拒绝，必须填写真实上限 [rad] |
 | `joint_states_topic` | `/arm_joint_states` | 发布话题 |
 | `input_file` | `""` | 回放 CSV 路径 |
-| `speed_scale` | `1.0` | 回放速度倍率 |
+| `speed_scale` | `1.0` | 回放速度倍率，允许范围 `(0, 1]` |
 | `loop` | `false` | 循环回放 |
 | `approach_velocity_rad_s` | `0.1` | 当前位置到 CSV 首点过渡的最大关节速度 |
 | `approach_rate_hz` | `50.0` | 首点过渡命令频率 |
 | `approach_min_duration_s` | `0.5` | 首点过渡最短时间 |
 | `start_tolerance_rad` | `0.005` | 与首点差值低于该值时跳过长过渡 |
-| `feedback_timeout_ms` | `10` | 手动 CSP SYNC 等待完整 TPDO2 反馈的最大时间 |
+| `feedback_timeout_ms` | `15` | 手动 CSP SYNC 等待完整 TPDO2 反馈的最大时间 |
+| `max_command_step_rad` | `0.005` | 单周期最大目标变化 [rad] |
+| `max_following_error_rad` | `0.05` | 最大 commanded-actual 误差 [rad] |
+| `following_error_cycles` | `3` | 连续超差的新鲜反馈周期数 |
 
 ---
 
@@ -508,7 +527,7 @@ ros2 launch miraculous_driver playback.launch.py \
   input_file:=/tmp/teach_j1_j3_v2.csv \
   approach_velocity_rad_s:=0.1 \
   approach_rate_hz:=50.0 \
-  feedback_timeout_ms:=10
+  feedback_timeout_ms:=15
 
 # 开始回放
 ros2 service call /playback/play std_srvs/srv/Trigger
@@ -634,7 +653,7 @@ install(TARGETS teach_record_node playback_node RUNTIME DESTINATION lib/${PROJEC
 ### 9.3 板上验证要点（详见 BOARD_TEST_CHECKLIST.md）
 
 - 修复 1：configure 后手扳关节再 activate，激活瞬间不跳变；拔 CAN 后激活必须被拒绝
-- 修复 2：`candump can0` 观察 `080` 帧 —— manual 模式频率 = update_rate 且只有一路；
+- 修复 2：`candump can1` 观察 `080` 帧 —— manual 模式频率 = update_rate 且只有一路；
   timer 模式挂满 6 关节仍只有一路
 - 修复 3：手转关节 ~90°，`/joint_states` 变化 ≈ ±1.57 rad
 
@@ -702,7 +721,8 @@ SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接�
 
 ## 12. 待办事项
 
-- [ ] 在 `config/miraculous_arm_params.yaml` 和 xacro/launch 中填入保守 `position_min` / `position_max` 软件限位
+- [ ] 在 `config/real_arm_profile.yaml` 中审核并冻结六轴 `position_min` / `position_max`，
+  通过校准门后再把 `calibrated` 设为 `true`
 - [ ] 在 ARM 目标机上用真实 CAN 总线进行端到端测试
 - [x] ~~`csp_set_target` 是否自动发 SYNC~~ — 2026-07-07 审查确认不自动发：`test_csp_ex.c:134-143` 在 set_target 后显式调用 `sync_send`
 - [x] ~~验证 SDK 风险项：`get_position` 是 SDO 还是 TPDO 缓存~~ — 2026-07-08 读源码确认：
@@ -728,7 +748,8 @@ SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接�
 | [miraculous_system.cpp](../src/miraculous_system.cpp) | 435 | 插件实现 |
 | [teach_record_node.cpp](../src/teach_record_node.cpp) | 260 | 示教记录节点 |
 | [playback_node.cpp](../src/playback_node.cpp) | 301 | 回放节点 |
-| [miraculous_arm_params.yaml](../config/miraculous_arm_params.yaml) | 28 | 电机参数 |
+| [real_arm_profile.yaml](../config/real_arm_profile.yaml) | — | 六轴 MoveIt 真机参数唯一来源与校准门 |
+| [miraculous_arm_params.yaml](../config/miraculous_arm_params.yaml) | — | 低层 commissioning 参数参考，不用于正式 MoveIt launch |
 | [BOARD_TEST_CHECKLIST.md](BOARD_TEST_CHECKLIST.md) | — | 2026-07-07 修复的板上测试步骤 |
 | [real_ros2_controllers.yaml](../config/real_ros2_controllers.yaml) | 39 | controller 配置 |
 | [real_control.launch.py](../launch/real_control.launch.py) | 53 | ros2_control 启动 |

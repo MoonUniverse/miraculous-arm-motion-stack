@@ -66,6 +66,8 @@ private:
   bool snapshot_is_safe(
     const FeedbackSnapshot & snapshot, bool require_fresh,
     std::string & reason) const;
+  bool following_error_is_safe(
+    const FeedbackSnapshot & snapshot, std::string & reason);
   void apply_snapshot(const FeedbackSnapshot & snapshot);
   void fail_safe_stop(const std::string & reason);
   void shutdown_arm();
@@ -78,9 +80,16 @@ private:
   std::array<bool, kArmJoints> configured_joints_{};
   std::array<double, kArmJoints> position_min_{};
   std::array<double, kArmJoints> position_max_{};
+  std::array<double, kArmJoints> last_sent_commands_{};
 
   std::unique_ptr<MiraculousArm> arm_;
   std::chrono::milliseconds feedback_stale_timeout_{30};
+  double max_command_step_rad_{0.0};
+  double max_following_error_rad_{0.0};
+  size_t following_error_cycles_{0};
+  size_t following_error_streak_{0};
+  uint64_t last_following_sequence_{0};
+  bool last_command_valid_{false};
   bool active_{false};
   bool fault_latched_{false};
   bool stop_issued_{false};

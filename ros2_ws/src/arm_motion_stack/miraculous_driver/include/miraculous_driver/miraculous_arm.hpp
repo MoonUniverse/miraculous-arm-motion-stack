@@ -33,8 +33,8 @@ struct JointConfig
 /// Arm-wide configuration.
 struct ArmConfig
 {
-  std::string can_interface = "can0";        ///< SocketCAN interface name
-  CiaBaudrate_t baudrate = CIA_BAUDRATE_1000; ///< CAN baudrate (0 = keep current)
+  std::string can_interface = "can1";        ///< SocketCAN interface name
+  CiaBaudrate_t baudrate = static_cast<CiaBaudrate_t>(0); ///< 0 = keep current
   std::vector<JointConfig> joints;            ///< configured real joints, 1..kArmJoints entries
   /// CSP SYNC period [us]. 0 = manual SYNC (wrapper sends one unified SYNC frame
   /// per write cycle after setting all targets). Non-zero = one shared SDK SYNC
@@ -44,11 +44,20 @@ struct ArmConfig
   uint8_t encoder_bw = 19;
   /// Gear ratio for load-side velocity conversion. SDK default 100.
   double reduction_ratio = 100.0;
-  double read_rate_hz = 100.0;                ///< background read thread frequency
+  double read_rate_hz = 50.0;                 ///< background read thread frequency
   double state_poll_rate_hz = 0.0;            ///< statusword SDO polling; 0 disables it
   /// Maximum wait for a complete TPDO2 set after a driver-owned manual SYNC.
   /// The wait returns immediately once all configured joints respond.
-  uint32_t manual_feedback_timeout_ms = 5;
+  uint32_t manual_feedback_timeout_ms = 15;
+  /// Reject a target transaction before any RPDO write when a configured
+  /// joint changes by more than this amount from the previous accepted target.
+  /// 0 disables the guard for passive or isolated commissioning paths.
+  double max_command_step_rad = 0.0;
+  /// Quick-stop after this following error is exceeded for the configured
+  /// number of consecutive fresh feedback transactions. Both values must be
+  /// zero (disabled) or positive (enabled).
+  double max_following_error_rad = 0.0;
+  uint32_t following_error_cycles = 0;
   /// Register the SDK's dedicated EMCY callback (miraculous_motor_set_emcy_callback).
   /// Never use miraculous_can_set_recv_callback here: the SDK's CANopen master
   /// occupies that slot for its own RX dispatch (TPDO cache / heartbeat / EMCY)
@@ -133,14 +142,18 @@ public:
   /// Enable all motors (without switching to CSP). Rarely needed directly.
   bool enable();
 
-  /// Disable all motors (Operation Enabled -> Switched On).
+  /// Disable all motors (Operation Enabled -> Switched On) and verify the
+  /// final state of every configured drive before releasing SDK I/O.
   virtual bool disable();
 
   /// Cut drive voltage (controlword 0x0000) and verify Switch On Disabled.
   /// Primarily used by passive teach mode and its fault handling.
   bool disable_voltage();
 
-  /// Quick-stop all motors (emergency deceleration).
+  /// Quick-stop all motors (emergency deceleration).  The SDK I/O path remains
+  /// quarantined afterwards so no later background SYNC can latch a partially
+  /// written target transaction.  A verified disable or shutdown is required
+  /// before normal feedback SYNC activity may resume.
   virtual bool quick_stop();
 
   /// Fault reset on all motors, then leave them disabled.
@@ -167,8 +180,10 @@ public:
 
   /// Set joint-side target positions [rad] for configured motors, then send one
   /// unified SYNC frame in manual SYNC mode. Non-finite or out-of-limit targets
-  /// are rejected before any motor write.
-  /// @return true if all writes succeeded.
+  /// are rejected before any motor write. A partial RPDO write or feedback
+  /// transaction failure suppresses the command SYNC, quick-stops the arm, and
+  /// quarantines SDK I/O until a verified disable or shutdown.
+  /// @return true only if every write and the fresh-feedback transaction succeed.
   virtual bool set_targets_rad(const std::array<double, kArmJoints> & targets);
 
   /// Send a single SYNC frame (CAN id 0x80, len 0) on the shared CAN context.
@@ -208,6 +223,7 @@ private:
     std::array<double, kArmJoints> & positions, int timeout_ms);
   bool rollback_csp_enable_locked(
     const std::array<CspEnableStage, kArmJoints> & stages);
+  bool quick_stop_locked(const char * context);
   bool enter_passive_ready_locked(int timeout_ms);
   bool verify_passive_ready_locked();
   bool disable_voltage_locked(int timeout_ms);
@@ -237,6 +253,10 @@ private:
   /// Guarded by sdk_mutex_. csp_init() configures timer mode once, while the
   /// timer itself is stopped until a complete enable_csp() succeeds.
   bool sync_timer_running_{false};
+  std::array<double, kArmJoints> last_targets_rad_{};
+  bool last_targets_valid_{false};       ///< guarded by sdk_mutex_
+  uint32_t following_error_streak_{0};   ///< guarded by sdk_mutex_
+  uint64_t last_following_feedback_sequence_{0};  ///< guarded by sdk_mutex_
 
   // cached state (mutex protected)
   mutable std::mutex state_mutex_;

@@ -5,6 +5,34 @@
 #include <cmath>
 #include <cstdio>
 
+namespace
+{
+constexpr int kRequiredSdkMajor = 1;
+constexpr int kRequiredSdkMinor = 1;
+constexpr int kRequiredSdkPatch = 0;
+
+bool sdk_version_is_compatible(const char * version)
+{
+  if (!version) {
+    return false;
+  }
+  int major = 0;
+  int minor = 0;
+  int patch = 0;
+  char trailing = '\0';
+  if (std::sscanf(version, "%d.%d.%d%c", &major, &minor, &patch, &trailing) != 3) {
+    return false;
+  }
+  if (major != kRequiredSdkMajor) {
+    return false;
+  }
+  if (minor != kRequiredSdkMinor) {
+    return minor > kRequiredSdkMinor;
+  }
+  return patch >= kRequiredSdkPatch;
+}
+}  // namespace
+
 namespace miraculous_driver
 {
 MiraculousArm::MiraculousArm()
@@ -23,6 +51,30 @@ MiraculousArm::~MiraculousArm()
 
 bool MiraculousArm::validate_config(const ArmConfig & config, const char * caller) const
 {
+  const char * sdk_version = miraculous_sdk_version();
+  if (!sdk_version_is_compatible(sdk_version)) {
+    std::fprintf(stderr,
+      "[miraculous_arm] %s: miraculous_sdk %s is incompatible; require >= %d.%d.%d "
+      "and < %d.0.0 "
+      "(rebuild the SDK library from this checkout)\n",
+      caller, sdk_version ? sdk_version : "<unknown>", kRequiredSdkMajor,
+      kRequiredSdkMinor, kRequiredSdkPatch, kRequiredSdkMajor + 1);
+    return false;
+  }
+  if (config.can_interface.empty() || config.encoder_bw == 0 || config.encoder_bw > 31 ||
+    !std::isfinite(config.reduction_ratio) || config.reduction_ratio <= 0.0 ||
+    !std::isfinite(config.read_rate_hz) || config.read_rate_hz <= 0.0 ||
+    !std::isfinite(config.state_poll_rate_hz) || config.state_poll_rate_hz < 0.0 ||
+    !std::isfinite(config.max_command_step_rad) || config.max_command_step_rad < 0.0 ||
+    !std::isfinite(config.max_following_error_rad) ||
+    config.max_following_error_rad < 0.0 ||
+    ((config.max_following_error_rad > 0.0) != (config.following_error_cycles > 0)))
+  {
+    std::fprintf(stderr,
+      "[miraculous_arm] %s: invalid CAN interface, conversion, or feedback rate\n",
+      caller);
+    return false;
+  }
   if (config.joints.empty() || config.joints.size() > kArmJoints) {
     std::fprintf(stderr,
       "[miraculous_arm] %s: expected 1..%zu configured joints, got %zu\n",
@@ -62,6 +114,12 @@ bool MiraculousArm::validate_config(const ArmConfig & config, const char * calle
         caller, joint.joint_index);
       return false;
     }
+    if (!std::isfinite(joint.position_min) || !std::isfinite(joint.position_max)) {
+      std::fprintf(stderr,
+        "[miraculous_arm] %s: joint %s has non-finite position limits\n",
+        caller, joint.name.c_str());
+      return false;
+    }
     seen[joint.joint_index] = true;
     seen_node_ids[joint.node_id] = true;
   }
@@ -82,14 +140,16 @@ bool MiraculousArm::init(const ArmConfig & config)
   if (!open_motors()) {
     return false;
   }
-  // Bring NMT to Operational so encoder objects (0x6064/0x606C) are readable
-  // even before the power stage is enabled. Best-effort: a failed bootstrap on
-  // one joint does not abort the others.
+  // Bring every configured node to NMT Operational before any CSP setup. A
+  // partial arm must never proceed into a real target transaction.
   for (const auto & joint : config_.joints) {
-    if (miraculous_motor_bootstrap(motors_[joint.joint_index], 3000) < 0) {
+    const int ret = miraculous_motor_bootstrap(motors_[joint.joint_index], 3000);
+    if (ret < 0) {
       std::fprintf(stderr,
-        "[miraculous_arm] init: bootstrap failed for joint %s (node %u)\n",
-        joint.name.c_str(), joint.node_id);
+        "[miraculous_arm] init: bootstrap failed for joint %s node %u: %s (%d)\n",
+        joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
+      close_motors(false);
+      return false;
     }
   }
 
@@ -126,6 +186,9 @@ bool MiraculousArm::init(const ArmConfig & config)
     }
   }
   sync_timer_running_ = false;
+  last_targets_valid_ = false;
+  following_error_streak_ = 0;
+  last_following_feedback_sequence_ = 0;
   passive_ = false;
   initialized_ = true;
   start_read_thread();
@@ -171,6 +234,9 @@ bool MiraculousArm::init_passive(const ArmConfig & config)
 
   passive_ = true;
   initialized_ = true;
+  last_targets_valid_ = false;
+  following_error_streak_ = 0;
+  last_following_feedback_sequence_ = 0;
   passive_sample_sequence_ = 0;
   return true;
 }
@@ -183,16 +249,13 @@ void MiraculousArm::shutdown()
     exclusive_sdk_io_ = false;
     {
       std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
-      if (passive_) {
-        // Do not send Shutdown (0x0006) here: it can leave Switch On Disabled.
-        // Passive mode must remain at controlword 0x0000 until handles close.
-        disable_voltage_locked(1000);
-      } else {
-        for (auto * motor : motors_) {
-          if (motor) {
-            miraculous_motor_shutdown(motor);
-          }
-        }
+      // Process teardown is the final safety boundary. Do not merely send
+      // Shutdown (0x0006) and close the handles: verify every configured drive
+      // reached Switch On Disabled before relinquishing CAN ownership.
+      if (!disable_voltage_locked(1000)) {
+        std::fprintf(stderr,
+          "[miraculous_arm] shutdown: failed to verify all drives in "
+          "Switch On Disabled before close\n");
       }
       close_motors(false);
     }
@@ -216,11 +279,24 @@ bool MiraculousArm::open_motors()
     }
     // Radian/velocity conversion parameters used by the _ex APIs. Defaults
     // match the SDK (19-bit encoder, 100:1 gear).
-    miraculous_motor_set_encoder_bw(motors_[joint.joint_index], config_.encoder_bw);
-    miraculous_motor_set_reduction_ratio(
-      motors_[joint.joint_index], static_cast<float>(config_.reduction_ratio));
-    miraculous_motor_set_tpdo_callback(
-      motors_[joint.joint_index], &MiraculousArm::tpdo_trampoline, this);
+    auto * motor = motors_[joint.joint_index];
+    int ret = miraculous_motor_set_encoder_bw(motor, config_.encoder_bw);
+    if (ret >= 0) {
+      ret = miraculous_motor_set_reduction_ratio(
+        motor, static_cast<float>(config_.reduction_ratio));
+    }
+    if (ret >= 0) {
+      ret = miraculous_motor_set_tpdo_callback(
+        motor, &MiraculousArm::tpdo_trampoline, this);
+    }
+    if (ret < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] open: SDK conversion/callback setup failed joint %s "
+        "node %u: %s (%d)\n",
+        joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
+      close_motors(false);
+      return false;
+    }
   }
   // EMCY monitoring via the SDK's dedicated per-bus dispatcher. Registering on
   // one motor covers every node on the interface (the callback receives the
@@ -230,7 +306,15 @@ bool MiraculousArm::open_motors()
   if (config_.enable_emcy_monitor) {
     for (auto * motor : motors_) {
       if (motor) {
-        miraculous_motor_set_emcy_callback(motor, &MiraculousArm::emcy_trampoline, this);
+        const int ret = miraculous_motor_set_emcy_callback(
+          motor, &MiraculousArm::emcy_trampoline, this);
+        if (ret < 0) {
+          std::fprintf(stderr,
+            "[miraculous_arm] open: EMCY callback registration failed: %s (%d)\n",
+            mrc_strerror(ret), ret);
+          close_motors(false);
+          return false;
+        }
         break;
       }
     }
@@ -656,6 +740,10 @@ bool MiraculousArm::enable_csp()
   }
   passive_ = false;
   csp_active_.store(true, std::memory_order_release);
+  last_targets_rad_ = seed_positions;
+  last_targets_valid_ = true;
+  following_error_streak_ = 0;
+  last_following_feedback_sequence_ = 0;
   exclusive_sdk_io_.store(!timer_sync, std::memory_order_release);
   return true;
 }
@@ -682,6 +770,7 @@ bool MiraculousArm::disable()
   const bool was_active = csp_active_.exchange(false, std::memory_order_acq_rel);
   bool release_exclusive_io = true;
   bool commands_ok = true;
+  bool states_ok = true;
   {
     std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
     // A caller may defensively call disable() after enable_csp() already
@@ -695,19 +784,47 @@ bool MiraculousArm::disable()
       // enable_csp() can start without calling csp_init again.
       for (const auto & joint : config_.joints) {
         if (motors_[joint.joint_index]) {
-          if (miraculous_motor_disable(motors_[joint.joint_index]) < 0) {
+          const int ret = miraculous_motor_disable(motors_[joint.joint_index]);
+          if (ret < 0) {
+            std::fprintf(stderr,
+              "[miraculous_arm] disable: command failed joint %s node %u: %s (%d)\n",
+              joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
             commands_ok = false;
           }
         } else {
           commands_ok = false;
         }
       }
+
+      for (const auto & joint : config_.joints) {
+        auto * motor = motors_[joint.joint_index];
+        if (!motor) {
+          states_ok = false;
+          continue;
+        }
+        const int ret = miraculous_motor_wait_state(
+          motor, CIA_STATE_SWITCHED_ON, 1000);
+        if (ret < 0) {
+          std::fprintf(stderr,
+            "[miraculous_arm] disable: state verification failed joint %s node %u: "
+            "%s (%d)\n",
+            joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
+          states_ok = false;
+          continue;
+        }
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        cached_states_[joint.joint_index] = CIA_STATE_SWITCHED_ON;
+      }
+      release_exclusive_io = commands_ok && states_ok;
     }
+    last_targets_valid_ = false;
+    following_error_streak_ = 0;
+    last_following_feedback_sequence_ = 0;
   }
   // Keep the read thread out of the SDK until every motor is disabled. Once
   // released it resumes the inactive-mode SYNC/TPDO feedback path.
   exclusive_sdk_io_.store(!release_exclusive_io, std::memory_order_release);
-  return release_exclusive_io && commands_ok;
+  return release_exclusive_io && commands_ok && states_ok;
 }
 
 bool MiraculousArm::disable_voltage_locked(int timeout_ms)
@@ -813,8 +930,12 @@ bool MiraculousArm::disable_voltage()
   {
     std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
     ok = disable_voltage_locked(1000);
+    last_targets_valid_ = false;
+    following_error_streak_ = 0;
+    last_following_feedback_sequence_ = 0;
   }
-  exclusive_sdk_io_.store(false, std::memory_order_release);
+  // A failed state confirmation keeps the feedback/SYNC path quarantined.
+  exclusive_sdk_io_.store(!ok, std::memory_order_release);
   return ok;
 }
 
@@ -823,21 +944,72 @@ bool MiraculousArm::quick_stop()
   if (!initialized_) {
     return false;
   }
-  csp_active_ = false;
+  csp_active_.store(false, std::memory_order_release);
+  // Publish quarantine before waiting for sdk_mutex_.  This closes the same
+  // read-loop race as enable_csp(): no new driver-owned feedback SYNC may start
+  // once emergency stopping begins.
+  exclusive_sdk_io_.store(true, std::memory_order_release);
+  std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
+  return quick_stop_locked("quick_stop");
+}
+
+bool MiraculousArm::quick_stop_locked(const char * context)
+{
   bool ok = true;
-  {
-    std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
-    for (const auto & joint : config_.joints) {
-      if (motors_[joint.joint_index]) {
-        if (miraculous_motor_quick_stop(motors_[joint.joint_index]) < 0) {
-          ok = false;
-        }
-      } else {
-        ok = false;
-      }
+  last_targets_valid_ = false;
+  following_error_streak_ = 0;
+  last_following_feedback_sequence_ = 0;
+
+  // Timer SYNC runs in the SDK receive thread and is independent of sdk_mutex_.
+  // Stop it before issuing drive state commands.  Manual-mode callers already
+  // suppress background SYNC through exclusive_sdk_io_.
+  if (config_.sync_period_us != 0 && sync_timer_running_) {
+    auto * sync_motor = first_motor_locked();
+    const int ret = sync_motor ? miraculous_motor_sync_stop(sync_motor) :
+      MRC_ERROR_NOT_INIT;
+    if (ret < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] %s: timer SYNC stop failed: %s (%d)\n",
+        context, mrc_strerror(ret), ret);
+      ok = false;
+    } else {
+      sync_timer_running_ = false;
     }
   }
-  exclusive_sdk_io_.store(false, std::memory_order_release);
+
+  for (const auto & joint : config_.joints) {
+    auto * motor = motors_[joint.joint_index];
+    const int ret = motor ? miraculous_motor_quick_stop(motor) :
+      MRC_ERROR_NOT_INIT;
+    if (ret < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] %s: quick stop failed joint %s node %u: %s (%d)\n",
+        context, joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
+      ok = false;
+    }
+  }
+
+  // Command acceptance alone is not a safe-stop acknowledgement. Confirm all
+  // configured drives have entered Quick Stop Active before reporting success.
+  for (const auto & joint : config_.joints) {
+    auto * motor = motors_[joint.joint_index];
+    if (!motor) {
+      ok = false;
+      continue;
+    }
+    const int ret = miraculous_motor_wait_state(
+      motor, CIA_STATE_QUICK_STOP_ACTIVE, 1000);
+    if (ret < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] %s: quick-stop state verification failed joint %s "
+        "node %u: %s (%d)\n",
+        context, joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
+      ok = false;
+      continue;
+    }
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    cached_states_[joint.joint_index] = CIA_STATE_QUICK_STOP_ACTIVE;
+  }
   return ok;
 }
 
@@ -857,7 +1029,9 @@ bool MiraculousArm::fault_reset()
   }
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    fault_detected_ = false;
+    if (ok) {
+      fault_detected_ = false;
+    }
   }
   return ok;
 }
@@ -971,23 +1145,53 @@ bool MiraculousArm::set_targets_rad(const std::array<double, kArmJoints> & targe
   if (!check_limits(clamped)) {
     std::fprintf(stderr,
       "[miraculous_arm] set_targets_rad: non-finite or out-of-limit target rejected\n");
+    if (initialized_ && csp_active_.load(std::memory_order_acquire)) {
+      quick_stop();
+    }
     return false;
   }
   if (!initialized_ || !csp_active_.load(std::memory_order_acquire)) {
     return false;
   }
-  bool ok = true;
   {
     std::lock_guard<std::mutex> sdk_lock(sdk_mutex_);
     if (!csp_active_.load(std::memory_order_acquire)) {
       return false;
     }
+    if (config_.max_command_step_rad > 0.0 && last_targets_valid_) {
+      for (const auto & joint : config_.joints) {
+        const size_t i = joint.joint_index;
+        const double step = std::abs(clamped[i] - last_targets_rad_[i]);
+        if (step > config_.max_command_step_rad) {
+          std::fprintf(stderr,
+            "[miraculous_arm] set_targets_rad: single-cycle step rejected joint %s "
+            "node %u: %.9f rad > %.9f rad; no RPDO written\n",
+            joint.name.c_str(), joint.node_id, step, config_.max_command_step_rad);
+          csp_active_.store(false, std::memory_order_release);
+          exclusive_sdk_io_.store(true, std::memory_order_release);
+          quick_stop_locked("set_targets_rad command step");
+          return false;
+        }
+      }
+    }
     for (const auto & joint : config_.joints) {
       const size_t i = joint.joint_index;
-      if (miraculous_motor_csp_set_target_ex(
-          motors_[i], static_cast<float>(clamped[i]), POS_UNIT_RADIAN) < 0)
+      const int ret = miraculous_motor_csp_set_target_ex(
+        motors_[i], static_cast<float>(clamped[i]), POS_UNIT_RADIAN);
+      if (ret < 0)
       {
-        ok = false;
+        std::fprintf(stderr,
+          "[miraculous_arm] set_targets_rad: RPDO target write failed joint %s "
+          "node %u: %s (%d); command SYNC suppressed\n",
+          joint.name.c_str(), joint.node_id, mrc_strerror(ret), ret);
+        csp_active_.store(false, std::memory_order_release);
+        exclusive_sdk_io_.store(true, std::memory_order_release);
+        if (!quick_stop_locked("set_targets_rad RPDO failure")) {
+          std::fprintf(stderr,
+            "[miraculous_arm] set_targets_rad: arm remains quarantined after "
+            "incomplete quick stop\n");
+        }
+        return false;
       }
     }
     // Unified manual SYNC so all axes apply targets on the same edge.
@@ -998,11 +1202,58 @@ bool MiraculousArm::set_targets_rad(const std::array<double, kArmJoints> & targe
       if (!refresh_feedback_locked(
           true, static_cast<int>(config_.manual_feedback_timeout_ms)))
       {
-        ok = false;
+        csp_active_.store(false, std::memory_order_release);
+        exclusive_sdk_io_.store(true, std::memory_order_release);
+        if (!quick_stop_locked("set_targets_rad feedback failure")) {
+          std::fprintf(stderr,
+            "[miraculous_arm] set_targets_rad: arm remains quarantined after "
+            "incomplete quick stop\n");
+        }
+        return false;
       }
     }
+    if (config_.max_following_error_rad > 0.0) {
+      FeedbackSnapshot snapshot;
+      if (!get_feedback_snapshot(snapshot)) {
+        csp_active_.store(false, std::memory_order_release);
+        exclusive_sdk_io_.store(true, std::memory_order_release);
+        quick_stop_locked("set_targets_rad feedback snapshot");
+        return false;
+      }
+      if (snapshot.sequence != last_following_feedback_sequence_) {
+        last_following_feedback_sequence_ = snapshot.sequence;
+        double worst_error = 0.0;
+        const JointConfig * worst_joint = nullptr;
+        for (const auto & joint : config_.joints) {
+          const double error = std::abs(
+            clamped[joint.joint_index] - snapshot.positions_rad[joint.joint_index]);
+          if (error > worst_error) {
+            worst_error = error;
+            worst_joint = &joint;
+          }
+        }
+        if (worst_error > config_.max_following_error_rad) {
+          ++following_error_streak_;
+        } else {
+          following_error_streak_ = 0;
+        }
+        if (following_error_streak_ >= config_.following_error_cycles) {
+          std::fprintf(stderr,
+            "[miraculous_arm] set_targets_rad: following error joint %s exceeded: "
+            "%.9f rad > %.9f rad for %u fresh cycles\n",
+            worst_joint ? worst_joint->name.c_str() : "unknown", worst_error,
+            config_.max_following_error_rad, following_error_streak_);
+          csp_active_.store(false, std::memory_order_release);
+          exclusive_sdk_io_.store(true, std::memory_order_release);
+          quick_stop_locked("set_targets_rad following error");
+          return false;
+        }
+      }
+    }
+    last_targets_rad_ = clamped;
+    last_targets_valid_ = true;
   }
-  return ok;
+  return true;
 }
 
 void MiraculousArm::send_sync()
@@ -1045,7 +1296,16 @@ bool MiraculousArm::refresh_feedback_locked(bool send_sync, int feedback_timeout
       ok = false;
       continue;
     }
-    miraculous_motor_get_velocity_ex(motors_[i], &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
+    const int vret = miraculous_motor_get_velocity_ex(
+      motors_[i], &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
+    if (vret < 0) {
+      std::fprintf(stderr,
+        "[miraculous_arm] refresh_feedback: get_velocity_ex failed joint %s node %u: "
+        "%s (%d)\n",
+        joint.name.c_str(), joint.node_id, mrc_strerror(vret), vret);
+      ok = false;
+      continue;
+    }
     refreshed_pos[i] = static_cast<double>(p_rad);
     refreshed_vel[i] = static_cast<double>(v_rad_s);
   }
@@ -1190,8 +1450,11 @@ void MiraculousArm::read_loop()
             if (pret < 0) {
               continue;
             }
-            miraculous_motor_get_velocity_ex(
+            const int vret = miraculous_motor_get_velocity_ex(
               motor, &v_rad_s, VEL_SIDE_LOAD, VEL_UNIT_RAD_S);
+            if (vret < 0) {
+              continue;
+            }
             if (poll_state) {
               Cia402State_t s = CIA_STATE_NOT_READY_TO_SWITCH_ON;
               if (miraculous_motor_get_state(motor, &s) >= 0) {

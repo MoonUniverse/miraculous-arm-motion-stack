@@ -19,9 +19,9 @@
 
 /*--- SDK 版本 ---*/
 #define MIRACULOUS_SDK_VERSION_MAJOR  1
-#define MIRACULOUS_SDK_VERSION_MINOR  0
+#define MIRACULOUS_SDK_VERSION_MINOR  1
 #define MIRACULOUS_SDK_VERSION_PATCH  0
-#define MIRACULOUS_SDK_VERSION        "1.0.0"
+#define MIRACULOUS_SDK_VERSION        "1.1.0"
 
 
 #include <stdint.h>
@@ -454,7 +454,7 @@ void miraculous_motor_close(MiraMotor *motor);
 /**
  * @brief 获取 SDK 版本信息
  *
- * @return 版本字符串, 如 "1.0.0"
+ * @return 版本字符串, 如 "1.1.0"
  */
 const char* miraculous_sdk_version(void);
 

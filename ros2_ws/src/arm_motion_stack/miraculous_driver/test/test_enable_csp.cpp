@@ -34,8 +34,10 @@ struct FakeSdk
   uint8_t missing_feedback_node = 0;
   uint8_t fail_target_node = 0;
   uint8_t fail_enable_node = 0;
+  uint8_t fail_disable_node = 0;
   uint8_t fail_disable_voltage_node = 0;
   uint8_t fail_quick_stop_node = 0;
+  uint8_t fail_velocity_node = 0;
   uint8_t fail_set_mode_node = 0;
   uint8_t wrong_final_state_node = 0;
   size_t fail_sync_call = 0;
@@ -84,6 +86,15 @@ public:
   static void set_manual_feedback_timeout(MiraculousArm & arm, uint32_t timeout_ms)
   {
     arm.config_.manual_feedback_timeout_ms = timeout_ms;
+  }
+
+  static void set_watchdogs(
+    MiraculousArm & arm, double max_step_rad,
+    double max_following_error_rad, uint32_t following_error_cycles)
+  {
+    arm.config_.max_command_step_rad = max_step_rad;
+    arm.config_.max_following_error_rad = max_following_error_rad;
+    arm.config_.following_error_cycles = following_error_cycles;
   }
 
   static void deliver_tpdo(MiraculousArm & arm, uint8_t node_id)
@@ -373,11 +384,164 @@ TEST_F(EnableCspTest, ManualTargetCycleRejectsFeedbackPastConfiguredDeadline)
 {
   use_nodes({1, 2}, 0);
   ASSERT_TRUE(arm_.enable_csp());
+  MiraculousArmTestPeer::set_manual_feedback_timeout(arm_, 5);
   g_fake.feedback_delay_ms = 6;
 
   std::array<double, kArmJoints> targets{};
   EXPECT_FALSE(arm_.set_targets_rad(targets));
   EXPECT_EQ(count_event("sync_send"), 4u);
+  EXPECT_FALSE(arm_.is_csp_enabled());
+  EXPECT_TRUE(MiraculousArmTestPeer::exclusive_io(arm_));
+  EXPECT_EQ(count_event("quick_stop", 1), 1u);
+  EXPECT_EQ(count_event("quick_stop", 2), 1u);
+}
+
+TEST_F(EnableCspTest, QuickStopVerifiesEveryConfiguredAxis)
+{
+  use_nodes({1, 2}, 0);
+  ASSERT_TRUE(arm_.enable_csp());
+  const size_t waits_before_node_1 = count_event("wait_state", 1);
+  const size_t waits_before_node_2 = count_event("wait_state", 2);
+
+  EXPECT_TRUE(arm_.quick_stop());
+  EXPECT_EQ(count_event("quick_stop", 1), 1u);
+  EXPECT_EQ(count_event("quick_stop", 2), 1u);
+  EXPECT_EQ(count_event("wait_state", 1), waits_before_node_1 + 1u);
+  EXPECT_EQ(count_event("wait_state", 2), waits_before_node_2 + 1u);
+  EXPECT_TRUE(MiraculousArmTestPeer::exclusive_io(arm_));
+}
+
+TEST_F(EnableCspTest, QuickStopStateFailureIsReportedAndRetainsQuarantine)
+{
+  use_nodes({1, 2}, 0);
+  ASSERT_TRUE(arm_.enable_csp());
+  g_fake.fail_quick_stop_node = 2;
+
+  EXPECT_FALSE(arm_.quick_stop());
+  EXPECT_TRUE(MiraculousArmTestPeer::exclusive_io(arm_));
+  EXPECT_EQ(count_event("quick_stop", 1), 1u);
+  EXPECT_EQ(count_event("quick_stop", 2), 1u);
+}
+
+TEST_F(EnableCspTest, RuntimeRpdoFailureSuppressesSyncAndQuarantinesArm)
+{
+  use_nodes({1, 2, 3}, 0);
+  ASSERT_TRUE(arm_.enable_csp());
+
+  g_fake.target_writes.fill(0);
+  g_fake.fail_target_node = 2;
+  const size_t sync_count_before = count_event("sync_send");
+  std::array<double, kArmJoints> targets{};
+  targets[0] = 0.2;
+  targets[1] = 0.3;
+  targets[2] = 0.4;
+
+  EXPECT_FALSE(arm_.set_targets_rad(targets));
+  EXPECT_EQ(count_event("sync_send"), sync_count_before);
+  EXPECT_EQ(g_fake.target_writes[1], 1u);
+  EXPECT_EQ(g_fake.target_writes[2], 1u);
+  EXPECT_EQ(g_fake.target_writes[3], 0u);
+  EXPECT_EQ(count_event("quick_stop", 1), 1u);
+  EXPECT_EQ(count_event("quick_stop", 2), 1u);
+  EXPECT_EQ(count_event("quick_stop", 3), 1u);
+  EXPECT_FALSE(arm_.is_csp_enabled());
+  EXPECT_TRUE(MiraculousArmTestPeer::exclusive_io(arm_));
+}
+
+TEST_F(EnableCspTest, CommandStepFailureWritesNoRpdoAndSuppressesSync)
+{
+  use_nodes({1, 2}, 0);
+  MiraculousArmTestPeer::set_watchdogs(arm_, 0.005, 0.0, 0);
+  ASSERT_TRUE(arm_.enable_csp());
+  g_fake.target_writes.fill(0);
+  const size_t sync_count_before = count_event("sync_send");
+
+  std::array<double, kArmJoints> targets{};
+  targets[0] = 0.11;
+  targets[1] = 0.2;
+  EXPECT_FALSE(arm_.set_targets_rad(targets));
+
+  EXPECT_EQ(g_fake.target_writes[1], 0u);
+  EXPECT_EQ(g_fake.target_writes[2], 0u);
+  EXPECT_EQ(count_event("sync_send"), sync_count_before);
+  EXPECT_FALSE(arm_.is_csp_enabled());
+  EXPECT_TRUE(MiraculousArmTestPeer::exclusive_io(arm_));
+}
+
+TEST_F(EnableCspTest, FollowingErrorQuickStopsAfterDistinctFreshCycles)
+{
+  use_nodes({1, 2}, 0);
+  MiraculousArmTestPeer::set_watchdogs(arm_, 1.0, 0.01, 2);
+  ASSERT_TRUE(arm_.enable_csp());
+
+  std::array<double, kArmJoints> targets{};
+  targets[0] = 0.2;
+  targets[1] = 0.3;
+  EXPECT_TRUE(arm_.set_targets_rad(targets));
+  EXPECT_FALSE(arm_.set_targets_rad(targets));
+
+  EXPECT_FALSE(arm_.is_csp_enabled());
+  EXPECT_TRUE(MiraculousArmTestPeer::exclusive_io(arm_));
+  EXPECT_EQ(count_event("quick_stop", 1), 1u);
+  EXPECT_EQ(count_event("quick_stop", 2), 1u);
+}
+
+TEST_F(EnableCspTest, VelocityReadFailureRejectsFeedbackAndQuarantinesArm)
+{
+  use_nodes({1, 2}, 0);
+  ASSERT_TRUE(arm_.enable_csp());
+  FeedbackSnapshot before;
+  ASSERT_TRUE(arm_.get_feedback_snapshot(before));
+  g_fake.fail_velocity_node = 2;
+
+  std::array<double, kArmJoints> targets{};
+  EXPECT_FALSE(arm_.set_targets_rad(targets));
+
+  FeedbackSnapshot after;
+  ASSERT_TRUE(arm_.get_feedback_snapshot(after));
+  EXPECT_EQ(after.sequence, before.sequence);
+  EXPECT_FALSE(arm_.is_csp_enabled());
+  EXPECT_TRUE(MiraculousArmTestPeer::exclusive_io(arm_));
+  EXPECT_EQ(count_event("quick_stop", 1), 1u);
+  EXPECT_EQ(count_event("quick_stop", 2), 1u);
+}
+
+TEST_F(EnableCspTest, DisableVerifiesEveryAxisBeforeReleasingIo)
+{
+  use_nodes({1, 2}, 0);
+  ASSERT_TRUE(arm_.enable_csp());
+
+  EXPECT_TRUE(arm_.disable());
+  EXPECT_EQ(count_event("disable", 1), 1u);
+  EXPECT_EQ(count_event("disable", 2), 1u);
+  EXPECT_FALSE(arm_.is_csp_enabled());
+  EXPECT_FALSE(MiraculousArmTestPeer::exclusive_io(arm_));
+}
+
+TEST_F(EnableCspTest, DisableStateFailureRetainsIoQuarantine)
+{
+  use_nodes({1, 2}, 0);
+  ASSERT_TRUE(arm_.enable_csp());
+  g_fake.fail_disable_node = 2;
+
+  EXPECT_FALSE(arm_.disable());
+  EXPECT_EQ(count_event("disable", 1), 1u);
+  EXPECT_EQ(count_event("disable", 2), 1u);
+  EXPECT_FALSE(arm_.is_csp_enabled());
+  EXPECT_TRUE(MiraculousArmTestPeer::exclusive_io(arm_));
+}
+
+TEST_F(EnableCspTest, DisableVoltageFailureRetainsIoQuarantine)
+{
+  use_nodes({1, 2}, 0);
+  ASSERT_TRUE(arm_.quick_stop());
+  ASSERT_TRUE(MiraculousArmTestPeer::exclusive_io(arm_));
+  g_fake.fail_disable_voltage_node = 2;
+
+  EXPECT_FALSE(arm_.disable_voltage());
+  EXPECT_TRUE(MiraculousArmTestPeer::exclusive_io(arm_));
+  EXPECT_EQ(count_event("disable_voltage", 1), 1u);
+  EXPECT_EQ(count_event("disable_voltage", 2), 1u);
 }
 
 TEST_F(EnableCspTest, MissingFreshFeedbackNeverEnablesOrRestartsTimer)
@@ -617,6 +781,9 @@ int __wrap_miraculous_motor_get_velocity_ex(
   (void)unit;
   const uint8_t node = miraculous_driver::node_id(motor);
   miraculous_driver::record("get_velocity", node);
+  if (miraculous_driver::g_fake.fail_velocity_node == node) {
+    return MRC_ERROR_TIMEOUT;
+  }
   *velocity = miraculous_driver::g_fake.positions[node] * 10.0f;
   return MRC_SUCCESS;
 }
@@ -644,6 +811,17 @@ int __wrap_miraculous_motor_enable(MiraMotor * motor)
     return MRC_ERROR_MOTION_STATE_TRANSITION;
   }
   miraculous_driver::g_fake.states[node] = CIA_STATE_OPERATION_ENABLED;
+  return MRC_SUCCESS;
+}
+
+int __wrap_miraculous_motor_disable(MiraMotor * motor)
+{
+  const uint8_t node = miraculous_driver::node_id(motor);
+  miraculous_driver::record("disable", node);
+  if (miraculous_driver::g_fake.fail_disable_node == node) {
+    return MRC_ERROR_CAN_SEND;
+  }
+  miraculous_driver::g_fake.states[node] = CIA_STATE_SWITCHED_ON;
   return MRC_SUCCESS;
 }
 

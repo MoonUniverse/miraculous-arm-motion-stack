@@ -7,25 +7,29 @@
 trajectory_test:
   ros__parameters:
     # ---- motor / CAN ----
-    can_interface: "can0"
-    baudrate: 1000
+    can_interface: "can1"
+    baudrate: 0
     node_ids: "1,2,3,4,5,6"
     # ROS joint slot for each node_id: 0=J1, 1=J2, ..., 5=J6.
     joint_indices: "0,1,2,3,4,5"
     # Values may be 1 value, one per configured node, or 6 full J1..J6 values.
-    # 0/0 disables clamping for that joint. Replace with measured safe limits before motion tests.
+    # Active tests reject 0/0. Replace these placeholders with measured safe limits.
     position_min: "0.0,0.0,0.0,0.0,0.0,0.0"
     position_max: "0.0,0.0,0.0,0.0,0.0,0.0"
 
     # ---- trajectory ----
     amplitude: 0.03         # [rad] conservative first-bringup amplitude
     period: 6.0             # [s]   one full cycle
-    frequency: 100.0        # [Hz]  command update rate
+    frequency: 50.0         # [Hz]  command update rate
     waveform: "sin"         # "sin" or "cos"
     test_joint: 0           # Legacy single-joint selection, used when test_joints is empty.
     test_joints: ""         # Comma-separated synchronized joints, e.g. "0,1" for J1/J2.
     duration: 3.0           # [s] auto-stop (0 = manual via service)
     settle_time: 0.5        # [s] wait before starting trajectory
+    feedback_timeout_ms: 15 # [ms] fresh TPDO2 deadline after Manual SYNC
+    max_command_step_rad: 0.005
+    max_following_error_rad: 0.05
+    following_error_cycles: 3
 
     # ---- output ----
     output_file: ""          # empty = auto timestamped filename

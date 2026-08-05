@@ -29,6 +29,7 @@
 #include "std_srvs/srv/trigger.hpp"
 
 #include "miraculous_driver/miraculous_arm.hpp"
+#include "strict_parameter_lists.hpp"
 
 using miraculous_driver::ArmConfig;
 using miraculous_driver::JointConfig;
@@ -37,39 +38,6 @@ using miraculous_driver::kArmJoints;
 
 namespace
 {
-/// Parse a comma-separated integer list.
-std::vector<int> parse_int_list(const std::string & s, const std::vector<int> & def)
-{
-  if (s.empty()) {
-    return def;
-  }
-  std::vector<int> out;
-  std::stringstream ss(s);
-  std::string tok;
-  while (std::getline(ss, tok, ',')) {
-    try {
-      out.push_back(std::stoi(tok));
-    } catch (...) {}
-  }
-  return out.empty() ? def : out;
-}
-
-bool parse_int_list_strict(const std::string & s, std::vector<int> & out)
-{
-  std::stringstream ss(s);
-  std::string tok;
-  while (std::getline(ss, tok, ',')) {
-    std::stringstream token_stream(tok);
-    int value = 0;
-    char extra = '\0';
-    if (!(token_stream >> value) || (token_stream >> extra)) {
-      return false;
-    }
-    out.push_back(value);
-  }
-  return !out.empty();
-}
-
 std::vector<int> default_joint_indices(size_t size)
 {
   std::vector<int> out;
@@ -106,26 +74,16 @@ bool validate_joint_indices(const std::vector<int> & indices)
   return true;
 }
 
-/// Parse a comma-separated double list.  If a single value is given, broadcast
-/// it to all kArmJoints entries.
-std::vector<double> parse_double_list(const std::string & s, double single_def)
+bool validate_node_ids(const std::vector<int> & node_ids)
 {
-  std::vector<double> out;
-  if (s.empty()) {
-    out.assign(kArmJoints, single_def);
-    return out;
+  std::array<bool, 128> seen{};
+  for (const int node_id : node_ids) {
+    if (node_id < 1 || node_id > 127 || seen[static_cast<size_t>(node_id)]) {
+      return false;
+    }
+    seen[static_cast<size_t>(node_id)] = true;
   }
-  std::stringstream ss(s);
-  std::string tok;
-  while (std::getline(ss, tok, ',')) {
-    try {
-      out.push_back(std::stod(tok));
-    } catch (...) {}
-  }
-  if (out.size() == 1) {
-    out.assign(kArmJoints, out[0]);
-  }
-  return out;
+  return true;
 }
 
 bool valid_limit_size(const std::vector<double> & values, size_t active_count)
@@ -173,8 +131,8 @@ public:
   TrajectoryTrackingTestNode() : Node("trajectory_test")
   {
     // ---- motor / CAN parameters ----
-    can_interface_ = declare_parameter<std::string>("can_interface", "can0");
-    baudrate_ = declare_parameter<int>("baudrate", 1000);
+    can_interface_ = declare_parameter<std::string>("can_interface", "can1");
+    baudrate_ = declare_parameter<int>("baudrate", 0);
     const std::string node_ids_str =
       declare_parameter<std::string>("node_ids", "1,2,3,4,5,6");
     const std::string joint_indices_str =
@@ -183,13 +141,12 @@ public:
       declare_parameter<std::string>("position_min", "0.0,0.0,0.0,0.0,0.0,0.0");
     const std::string position_max_str =
       declare_parameter<std::string>("position_max", "0.0,0.0,0.0,0.0,0.0,0.0");
-    sync_period_us_ = static_cast<uint32_t>(
-      declare_parameter<int>("sync_period_us", 10000));              // 0=manual, >0=SDK timer
+    const int sync_period_us = declare_parameter<int>("sync_period_us", 0);
 
     // ---- trajectory parameters ----
     amplitude_ = declare_parameter<double>("amplitude", 0.03);        // [rad]
     period_ = declare_parameter<double>("period", 6.0);               // [s]
-    frequency_ = declare_parameter<double>("frequency", 100.0);        // [Hz]
+    frequency_ = declare_parameter<double>("frequency", 50.0);         // [Hz]
     waveform_ = declare_parameter<std::string>("waveform", "sin");    // "sin"|"cos"
     const int legacy_test_joint = declare_parameter<int>("test_joint", 0);
     const std::string test_joints_str =
@@ -199,15 +156,35 @@ public:
     joint_states_topic_ =
       declare_parameter<std::string>("joint_states_topic", "/arm_joint_states");
     settle_time_ = declare_parameter<double>("settle_time", 0.5);      // [s]
+    feedback_timeout_ms_ = declare_parameter<int>("feedback_timeout_ms", 15);
+    max_command_step_rad_ = declare_parameter<double>("max_command_step_rad", 0.005);
+    max_following_error_rad_ =
+      declare_parameter<double>("max_following_error_rad", 0.05);
+    following_error_cycles_ = declare_parameter<int>("following_error_cycles", 3);
 
     // ---- validate ----
-    std::vector<int> requested_test_joints;
-    if (test_joints_str.empty()) {
-      requested_test_joints.push_back(legacy_test_joint);
-    } else if (!parse_int_list_strict(test_joints_str, requested_test_joints)) {
-      RCLCPP_FATAL(get_logger(), "test_joints must be a comma-separated integer list");
-      throw std::runtime_error("bad test_joints");
+    if (can_interface_.empty() || baudrate_ < 0 || sync_period_us != 0 ||
+      !std::isfinite(amplitude_) || amplitude_ <= 0.0 ||
+      !std::isfinite(period_) || period_ <= 0.0 ||
+      !std::isfinite(frequency_) || frequency_ <= 0.0 || frequency_ > 200.0 ||
+      !std::isfinite(duration_) || duration_ < 0.0 ||
+      !std::isfinite(settle_time_) || settle_time_ < 0.0 ||
+      feedback_timeout_ms_ <= 0 ||
+      !std::isfinite(max_command_step_rad_) || max_command_step_rad_ <= 0.0 ||
+      !std::isfinite(max_following_error_rad_) || max_following_error_rad_ <= 0.0 ||
+      following_error_cycles_ <= 0 ||
+      (waveform_ != "sin" && waveform_ != "cos"))
+    {
+      RCLCPP_FATAL(get_logger(),
+        "invalid active test parameters: Manual SYNC (sync_period_us=0), finite "
+        "timing, feedback timeout, and waveform sin/cos are required");
+      throw std::runtime_error("bad active test parameters");
     }
+    sync_period_us_ = static_cast<uint32_t>(sync_period_us);
+
+    const std::vector<int> requested_test_joints =
+      miraculous_driver::parse_int_parameter_list(
+      test_joints_str, {legacy_test_joint}, "test_joints");
     if (requested_test_joints.empty() || !validate_joint_indices(requested_test_joints)) {
       RCLCPP_FATAL(get_logger(),
         "test_joint/test_joints must list unique values in range 0..%zu", kArmJoints - 1);
@@ -217,14 +194,20 @@ public:
       test_joints_.push_back(static_cast<size_t>(index));
     }
 
-    auto node_ids = parse_int_list(node_ids_str, {1, 2, 3, 4, 5, 6});
-    auto joint_indices = parse_int_list(joint_indices_str, default_joint_indices(node_ids.size()));
-    auto position_min = parse_double_list(position_min_str, 0.0);
-    auto position_max = parse_double_list(position_max_str, 0.0);
+    const auto node_ids = miraculous_driver::parse_int_parameter_list(
+      node_ids_str, {1, 2, 3, 4, 5, 6}, "node_ids");
+    const auto joint_indices = miraculous_driver::parse_int_parameter_list(
+      joint_indices_str, default_joint_indices(node_ids.size()), "joint_indices");
+    const auto position_min = miraculous_driver::parse_double_parameter_list(
+      position_min_str, std::vector<double>(kArmJoints, 0.0), "position_min");
+    const auto position_max = miraculous_driver::parse_double_parameter_list(
+      position_max_str, std::vector<double>(kArmJoints, 0.0), "position_max");
 
-    if (node_ids.empty() || node_ids.size() > kArmJoints) {
+    if (node_ids.empty() || node_ids.size() > kArmJoints ||
+      !validate_node_ids(node_ids))
+    {
       RCLCPP_FATAL(get_logger(),
-        "node_ids must list 1..%zu values", kArmJoints);
+        "node_ids must list 1..%zu unique values in range 1..127", kArmJoints);
       throw std::runtime_error("bad params");
     }
     if (joint_indices.size() != node_ids.size() || !validate_joint_indices(joint_indices)) {
@@ -251,6 +234,20 @@ public:
         node_ids.size(), kArmJoints);
       throw std::runtime_error("bad position limits");
     }
+    for (size_t i = 0; i < node_ids.size(); ++i) {
+      const size_t joint_index = static_cast<size_t>(joint_indices[i]);
+      const double lower = limit_value_for_joint(position_min, i, joint_index);
+      const double upper = limit_value_for_joint(position_max, i, joint_index);
+      if (!std::isfinite(lower) || !std::isfinite(upper) || lower >= upper) {
+        RCLCPP_FATAL(get_logger(),
+          "active trajectory test requires finite ordered limits for J%zu; "
+          "got [%.9f, %.9f]",
+          joint_index + 1, lower, upper);
+        throw std::runtime_error("missing or invalid active trajectory limits");
+      }
+      position_min_[joint_index] = lower;
+      position_max_[joint_index] = upper;
+    }
 
     // ---- open motors and configure CSP once (power stage remains disabled) ----
     ArmConfig config;
@@ -258,6 +255,10 @@ public:
     config.baudrate = static_cast<CiaBaudrate_t>(baudrate_);
     config.sync_period_us = sync_period_us_;
     config.read_rate_hz = std::max(frequency_, 10.0);
+    config.manual_feedback_timeout_ms = static_cast<uint32_t>(feedback_timeout_ms_);
+    config.max_command_step_rad = max_command_step_rad_;
+    config.max_following_error_rad = max_following_error_rad_;
+    config.following_error_cycles = static_cast<uint32_t>(following_error_cycles_);
     config.enable_emcy_monitor = declare_parameter<bool>("enable_emcy_monitor", true);
     for (size_t i = 0; i < node_ids.size(); ++i) {
       const size_t joint_index = static_cast<size_t>(joint_indices[i]);
@@ -345,9 +346,10 @@ private:
       res->message = "not running";
       return;
     }
-    stop_test();
-    res->success = true;
-    res->message = "test stopped, saved " + current_file_;
+    res->success = stop_test();
+    res->message = res->success
+      ? ("test stopped, saved " + current_file_)
+      : "test stopped, but the drive safe state could not be verified (see logs)";
   }
 
   // ================================================================ test flow
@@ -372,11 +374,21 @@ private:
     std::array<double, kArmJoints> cur{};
     if (!arm_->get_positions_rad(cur)) {
       RCLCPP_ERROR(get_logger(), "No valid motor feedback after enable_csp; refusing to start.");
-      arm_->disable();
+      disable_arm("feedback failure after CSP enable");
       return false;
     }
     for (const size_t joint : test_joints_) {
       dc_offsets_[joint] = cur[joint];
+      if (dc_offsets_[joint] - amplitude_ < position_min_[joint] ||
+        dc_offsets_[joint] + amplitude_ > position_max_[joint])
+      {
+        RCLCPP_ERROR(get_logger(),
+          "J%zu test range [%.6f, %.6f] exceeds software limits [%.6f, %.6f]",
+          joint + 1, dc_offsets_[joint] - amplitude_, dc_offsets_[joint] + amplitude_,
+          position_min_[joint], position_max_[joint]);
+        disable_arm("test range rejection");
+        return false;
+      }
       RCLCPP_INFO(get_logger(), "DC offset (current J%zu pos) = %.6f rad",
         joint + 1, dc_offsets_[joint]);
     }
@@ -386,7 +398,7 @@ private:
     ofs_.open(current_file_);
     if (!ofs_.is_open()) {
       RCLCPP_ERROR(get_logger(), "Cannot open %s", current_file_.c_str());
-      arm_->disable();
+      disable_arm("output file failure");
       return false;
     }
     if (test_joints_.size() == 1) {
@@ -419,7 +431,19 @@ private:
     return true;
   }
 
-  void stop_test()
+  bool disable_arm(const char * context)
+  {
+    if (!arm_ || arm_->disable()) {
+      return true;
+    }
+    RCLCPP_ERROR(
+      get_logger(),
+      "%s: failed to verify every drive left Operation Enabled; SDK I/O remains quarantined",
+      context);
+    return false;
+  }
+
+  bool stop_test()
   {
     running_ = false;
     if (timer_) {
@@ -430,16 +454,15 @@ private:
       ofs_.flush();
       ofs_.close();
     }
-    if (arm_) {
-      arm_->disable();
-    }
+    const bool disabled = disable_arm("trajectory test stop");
 
     // Compute and print metrics.
     if (samples_.empty()) {
       RCLCPP_WARN(get_logger(), "No samples recorded.");
-      return;
+      return disabled;
     }
     print_metrics();
+    return disabled;
   }
 
   // ================================================================ timer
@@ -665,19 +688,25 @@ private:
 
   // ---- motor / CAN params ----
   std::string can_interface_;
-  int baudrate_{1000};
-  uint32_t sync_period_us_{10000};
+  int baudrate_{0};
+  uint32_t sync_period_us_{0};
   std::string joint_states_topic_;
 
   // ---- trajectory params ----
   double amplitude_{0.5};
   double period_{5.0};
-  double frequency_{100.0};
+  double frequency_{50.0};
   std::string waveform_{"sin"};
   std::vector<size_t> test_joints_;
   double duration_{0.0};
   double settle_time_{0.5};
+  int feedback_timeout_ms_{15};
+  double max_command_step_rad_{0.005};
+  double max_following_error_rad_{0.05};
+  int following_error_cycles_{3};
   std::string output_file_;
+  std::array<double, kArmJoints> position_min_{};
+  std::array<double, kArmJoints> position_max_{};
 
   // ---- state ----
   std::unique_ptr<MiraculousArm> arm_;

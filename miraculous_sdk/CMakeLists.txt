@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.10)
-project(miraculous_sdk VERSION 1.0.0 LANGUAGES C)
+project(miraculous_sdk VERSION 1.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # --- 版本信息 ---
-set(SDK_VERSION "1.0.0")
+set(SDK_VERSION "1.1.0")
 
 # --- 编译选项 ---
 add_compile_options(-Wall -Wextra -Wpedantic -O2 -fPIC)

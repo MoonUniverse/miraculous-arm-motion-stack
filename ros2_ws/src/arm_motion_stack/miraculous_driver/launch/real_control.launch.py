@@ -31,6 +31,9 @@ def generate_launch_description():
         "manual_feedback_timeout_ms",
         "feedback_stale_timeout_ms",
         "enable_emcy_monitor",
+        "max_command_step_rad",
+        "max_following_error_rad",
+        "following_error_cycles",
         "require_full_arm",
         "require_position_limits",
         "update_rate",
@@ -67,7 +70,13 @@ def generate_launch_description():
     control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
-        parameters=[controller_config, {"update_rate": values["update_rate"]}],
+        parameters=[
+            controller_config,
+            {
+                "update_rate": values["update_rate"],
+                "hardware_components_initial_state": {"inactive": ["ARMSystem"]},
+            },
+        ],
         output="screen",
         remappings=[
             ("~/robot_description", "/robot_description"),
@@ -87,14 +96,19 @@ def generate_launch_description():
     arm_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["arm_controller", "--controller-manager", "/controller_manager"],
+        arguments=[
+            "arm_controller",
+            "--inactive",
+            "--controller-manager",
+            "/controller_manager",
+        ],
         output="screen",
     )
 
     declarations = [
         DeclareLaunchArgument("joint_states_topic", default_value="/arm_joint_states"),
-        DeclareLaunchArgument("can_interface", default_value="can0"),
-        DeclareLaunchArgument("baudrate", default_value="1000"),
+        DeclareLaunchArgument("can_interface", default_value="can1"),
+        DeclareLaunchArgument("baudrate", default_value="0"),
         DeclareLaunchArgument("encoder_bw", default_value="19"),
         DeclareLaunchArgument("reduction_ratio", default_value="100.0"),
         DeclareLaunchArgument("node_ids", default_value="1,2,3,4,5,6"),
@@ -106,14 +120,17 @@ def generate_launch_description():
             "position_max", default_value="0.0,0.0,0.0,0.0,0.0,0.0"
         ),
         DeclareLaunchArgument("sync_period_us", default_value="0"),
-        DeclareLaunchArgument("read_rate_hz", default_value="100.0"),
+        DeclareLaunchArgument("read_rate_hz", default_value="50.0"),
         DeclareLaunchArgument("state_poll_rate_hz", default_value="0.0"),
-        DeclareLaunchArgument("manual_feedback_timeout_ms", default_value="5"),
+        DeclareLaunchArgument("manual_feedback_timeout_ms", default_value="15"),
         DeclareLaunchArgument("feedback_stale_timeout_ms", default_value="30"),
         DeclareLaunchArgument("enable_emcy_monitor", default_value="true"),
+        DeclareLaunchArgument("max_command_step_rad", default_value="0.005"),
+        DeclareLaunchArgument("max_following_error_rad", default_value="0.05"),
+        DeclareLaunchArgument("following_error_cycles", default_value="3"),
         DeclareLaunchArgument("require_full_arm", default_value="false"),
-        DeclareLaunchArgument("require_position_limits", default_value="false"),
-        DeclareLaunchArgument("update_rate", default_value="100"),
+        DeclareLaunchArgument("require_position_limits", default_value="true"),
+        DeclareLaunchArgument("update_rate", default_value="50"),
     ]
     return LaunchDescription(
         declarations

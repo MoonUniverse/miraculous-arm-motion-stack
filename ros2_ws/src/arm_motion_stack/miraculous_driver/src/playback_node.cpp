@@ -19,6 +19,7 @@
 
 #include "miraculous_driver/miraculous_arm.hpp"
 #include "playback_csv_header.hpp"
+#include "strict_parameter_lists.hpp"
 
 using miraculous_driver::ArmConfig;
 using miraculous_driver::CsvHeaderFormat;
@@ -42,22 +43,6 @@ struct LoadedTrajectory
   std::array<bool, miraculous_driver::kArmJoints> joint_mask{};
   bool is_v2 = false;
 };
-
-std::vector<int> parse_int_list(const std::string & s, const std::vector<int> & def)
-{
-  if (s.empty()) {
-    return def;
-  }
-  std::vector<int> out;
-  std::stringstream ss(s);
-  std::string tok;
-  while (std::getline(ss, tok, ',')) {
-    try {
-      out.push_back(std::stoi(tok));
-    } catch (...) {}
-  }
-  return out.empty() ? def : out;
-}
 
 std::vector<int> default_joint_indices(size_t size)
 {
@@ -94,26 +79,6 @@ bool validate_node_ids(const std::vector<int> & node_ids)
     seen[static_cast<size_t>(node_id)] = true;
   }
   return true;
-}
-
-std::vector<double> parse_double_list(const std::string & s, double single_def)
-{
-  std::vector<double> out;
-  if (s.empty()) {
-    out.assign(miraculous_driver::kArmJoints, single_def);
-    return out;
-  }
-  std::stringstream ss(s);
-  std::string tok;
-  while (std::getline(ss, tok, ',')) {
-    try {
-      out.push_back(std::stod(tok));
-    } catch (...) {}
-  }
-  if (out.size() == 1) {
-    out.assign(miraculous_driver::kArmJoints, out[0]);
-  }
-  return out;
 }
 
 bool valid_limit_size(const std::vector<double> & values, size_t active_count)
@@ -305,8 +270,8 @@ class PlaybackNode : public rclcpp::Node
 public:
   PlaybackNode() : Node("playback")
   {
-    can_interface_ = declare_parameter<std::string>("can_interface", "can0");
-    baudrate_ = declare_parameter<int>("baudrate", 1000);
+    can_interface_ = declare_parameter<std::string>("can_interface", "can1");
+    baudrate_ = declare_parameter<int>("baudrate", 0);
     const std::string node_ids_str =
       declare_parameter<std::string>("node_ids", "1,2,3,4,5,6");
     const std::string joint_indices_str =
@@ -326,13 +291,26 @@ public:
     approach_min_duration_s_ =
       declare_parameter<double>("approach_min_duration_s", 0.5);
     start_tolerance_rad_ = declare_parameter<double>("start_tolerance_rad", 0.005);
-    feedback_timeout_ms_ = declare_parameter<int>("feedback_timeout_ms", 10);
+    feedback_timeout_ms_ = declare_parameter<int>("feedback_timeout_ms", 15);
+    max_command_step_rad_ = declare_parameter<double>("max_command_step_rad", 0.005);
+    max_following_error_rad_ =
+      declare_parameter<double>("max_following_error_rad", 0.05);
+    following_error_cycles_ = declare_parameter<int>("following_error_cycles", 3);
 
-    const auto node_ids = parse_int_list(node_ids_str, {1, 2, 3, 4, 5, 6});
+    if (can_interface_.empty() || baudrate_ < 0) {
+      RCLCPP_FATAL(get_logger(), "can_interface must be non-empty and baudrate non-negative");
+      throw std::runtime_error("bad CAN parameters");
+    }
+
+    const auto node_ids = miraculous_driver::parse_int_parameter_list(
+      node_ids_str, {1, 2, 3, 4, 5, 6}, "node_ids");
     const auto joint_indices =
-      parse_int_list(joint_indices_str, default_joint_indices(node_ids.size()));
-    const auto position_min = parse_double_list(position_min_str, 0.0);
-    const auto position_max = parse_double_list(position_max_str, 0.0);
+      miraculous_driver::parse_int_parameter_list(
+      joint_indices_str, default_joint_indices(node_ids.size()), "joint_indices");
+    const auto position_min = miraculous_driver::parse_double_parameter_list(
+      position_min_str, std::vector<double>(kArmJoints, 0.0), "position_min");
+    const auto position_max = miraculous_driver::parse_double_parameter_list(
+      position_max_str, std::vector<double>(kArmJoints, 0.0), "position_max");
 
     if (node_ids.empty() || node_ids.size() > miraculous_driver::kArmJoints ||
       !validate_node_ids(node_ids))
@@ -356,27 +334,30 @@ public:
         node_ids.size(), miraculous_driver::kArmJoints);
       throw std::runtime_error("bad position limits");
     }
-    for (const double limit : position_min) {
-      if (!std::isfinite(limit)) {
-        RCLCPP_FATAL(get_logger(), "position_min contains a non-finite value");
-        throw std::runtime_error("position_min contains a non-finite value");
+    for (size_t i = 0; i < node_ids.size(); ++i) {
+      const size_t joint_index = static_cast<size_t>(joint_indices[i]);
+      const double lower = limit_value_for_joint(position_min, i, joint_index);
+      const double upper = limit_value_for_joint(position_max, i, joint_index);
+      if (!std::isfinite(lower) || !std::isfinite(upper) || lower >= upper) {
+        RCLCPP_FATAL(get_logger(),
+          "active playback requires finite ordered limits for J%zu; got [%.9f, %.9f]",
+          joint_index + 1, lower, upper);
+        throw std::runtime_error("missing or invalid active playback limits");
       }
     }
-    for (const double limit : position_max) {
-      if (!std::isfinite(limit)) {
-        RCLCPP_FATAL(get_logger(), "position_max contains a non-finite value");
-        throw std::runtime_error("position_max contains a non-finite value");
-      }
-    }
-    if (!std::isfinite(speed_scale_) || speed_scale_ <= 0.0 ||
+    if (!std::isfinite(speed_scale_) || speed_scale_ <= 0.0 || speed_scale_ > 1.0 ||
       !std::isfinite(approach_velocity_rad_s_) || approach_velocity_rad_s_ <= 0.0 ||
       !std::isfinite(approach_rate_hz_) || approach_rate_hz_ <= 0.0 ||
       approach_rate_hz_ > 200.0 ||
       !std::isfinite(approach_min_duration_s_) || approach_min_duration_s_ < 0.0 ||
       !std::isfinite(start_tolerance_rad_) || start_tolerance_rad_ < 0.0 ||
-      feedback_timeout_ms_ <= 0)
+      feedback_timeout_ms_ <= 0 ||
+      !std::isfinite(max_command_step_rad_) || max_command_step_rad_ <= 0.0 ||
+      !std::isfinite(max_following_error_rad_) || max_following_error_rad_ <= 0.0 ||
+      following_error_cycles_ <= 0)
     {
-      RCLCPP_FATAL(get_logger(), "invalid playback timing/safety parameters");
+      RCLCPP_FATAL(get_logger(),
+        "invalid playback timing/safety parameters; speed_scale must be in (0, 1]");
       throw std::runtime_error("bad playback parameters");
     }
 
@@ -384,9 +365,12 @@ public:
     config.can_interface = can_interface_;
     config.baudrate = static_cast<CiaBaudrate_t>(baudrate_);
     config.sync_period_us = 0;
-    config.read_rate_hz = 100.0;
+    config.read_rate_hz = 50.0;
     config.manual_feedback_timeout_ms =
       static_cast<uint32_t>(feedback_timeout_ms_);
+    config.max_command_step_rad = max_command_step_rad_;
+    config.max_following_error_rad = max_following_error_rad_;
+    config.following_error_cycles = static_cast<uint32_t>(following_error_cycles_);
     for (size_t i = 0; i < node_ids.size(); ++i) {
       const size_t joint_index = static_cast<size_t>(joint_indices[i]);
       JointConfig joint;
@@ -432,12 +416,24 @@ public:
       play_thread_.join();
     }
     if (arm_) {
-      arm_->disable();
+      disable_arm("playback shutdown");
       arm_->shutdown();
     }
   }
 
 private:
+  bool disable_arm(const char * context)
+  {
+    if (!arm_ || arm_->disable()) {
+      return true;
+    }
+    RCLCPP_ERROR(
+      get_logger(),
+      "%s: failed to verify every drive left Operation Enabled; SDK I/O remains quarantined",
+      context);
+    return false;
+  }
+
   void on_play(
     const std::shared_ptr<std_srvs::srv::Trigger::Request>,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
@@ -684,7 +680,7 @@ private:
     RCLCPP_INFO(get_logger(), "Enabling CSP and seeding current position...");
     if (!arm_->enable_csp()) {
       RCLCPP_ERROR(get_logger(), "enable_csp failed, aborting playback.");
-      arm_->disable();
+      disable_arm("CSP enable failure");
       playing_ = false;
       return;
     }
@@ -700,9 +696,12 @@ private:
       }
     } while (loop_ && !stop_requested_);
 
-    arm_->disable();
+    const bool disabled = disable_arm("playback completion");
     playing_ = false;
-    if (completed) {
+    if (!disabled) {
+      RCLCPP_ERROR(
+        get_logger(), "Playback ended, but the drive safe state could not be verified.");
+    } else if (completed) {
       RCLCPP_INFO(get_logger(), "Playback finished.");
     } else if (stop_requested_) {
       RCLCPP_INFO(get_logger(), "Playback stopped: %s", error.c_str());
@@ -729,7 +728,7 @@ private:
   }
 
   std::string can_interface_;
-  int baudrate_{1000};
+  int baudrate_{0};
   std::string joint_states_topic_;
   std::string input_file_;
   double speed_scale_{1.0};
@@ -738,7 +737,10 @@ private:
   double approach_rate_hz_{50.0};
   double approach_min_duration_s_{0.5};
   double start_tolerance_rad_{0.005};
-  int feedback_timeout_ms_{10};
+  int feedback_timeout_ms_{15};
+  double max_command_step_rad_{0.005};
+  double max_following_error_rad_{0.05};
+  int following_error_cycles_{3};
   std::vector<JointConfig> joints_;
   std::array<bool, kArmJoints> configured_joint_mask_{};
 

@@ -119,8 +119,8 @@ hardware_interface::HardwareInfo makeHardwareInfo()
   info.type = "system";
   info.hardware_class_type = "miraculous_driver/MiraculousSystem";
   info.hardware_parameters = {
-    {"can_interface", "can0"},
-    {"baudrate", "1000"},
+    {"can_interface", "can1"},
+    {"baudrate", "0"},
     {"encoder_bw", "19"},
     {"reduction_ratio", "100.0"},
     {"node_ids", "1,2,3,4,5,6"},
@@ -128,12 +128,15 @@ hardware_interface::HardwareInfo makeHardwareInfo()
     {"position_min", "-1,-1,-1,-1,-1,-1"},
     {"position_max", "1,1,1,1,1,1"},
     {"sync_period_us", "0"},
-    {"read_rate_hz", "100.0"},
+    {"read_rate_hz", "50.0"},
     {"state_poll_rate_hz", "0.0"},
-    {"manual_feedback_timeout_ms", "5"},
+    {"manual_feedback_timeout_ms", "15"},
     {"feedback_stale_timeout_ms", "30"},
     // xacro renders boolean substitutions with this capitalization.
     {"enable_emcy_monitor", "True"},
+    {"max_command_step_rad", "0.005"},
+    {"max_following_error_rad", "0.05"},
+    {"following_error_cycles", "3"},
     {"require_full_arm", "True"},
     {"require_position_limits", "True"},
   };
@@ -258,6 +261,58 @@ TEST_F(MiraculousSystemTest, OutOfLimitCommandFailsBeforeSdkWrite)
   EXPECT_EQ(state_->quick_stop_calls, 1);
 }
 
+TEST_F(MiraculousSystemTest, SingleCycleCommandJumpFailsBeforeSdkWrite)
+{
+  initializeAndConfigure();
+  ASSERT_EQ(
+    system_.on_activate(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::SUCCESS);
+  auto commands = system_.export_command_interfaces();
+  commands[0].set_value(0.106);
+
+  EXPECT_EQ(
+    system_.write(rclcpp::Time(0), rclcpp::Duration(0, 0)),
+    hardware_interface::return_type::ERROR);
+  EXPECT_EQ(state_->target_calls, 0);
+  EXPECT_EQ(state_->quick_stop_calls, 1);
+}
+
+TEST_F(MiraculousSystemTest, FollowingErrorCountsOnlyDistinctFeedbackSets)
+{
+  auto info = makeHardwareInfo();
+  info.hardware_parameters["max_command_step_rad"] = "0.02";
+  info.hardware_parameters["max_following_error_rad"] = "0.005";
+  info.hardware_parameters["following_error_cycles"] = "2";
+  ASSERT_EQ(system_.on_init(info), hardware_interface::CallbackReturn::SUCCESS);
+  ASSERT_EQ(
+    system_.on_configure(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::SUCCESS);
+  ASSERT_EQ(
+    system_.on_activate(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::SUCCESS);
+
+  auto commands = system_.export_command_interfaces();
+  commands[0].set_value(0.11);
+  ASSERT_EQ(
+    system_.write(rclcpp::Time(0), rclcpp::Duration(0, 0)),
+    hardware_interface::return_type::OK);
+  EXPECT_EQ(
+    system_.read(rclcpp::Time(0), rclcpp::Duration(0, 0)),
+    hardware_interface::return_type::OK);
+  // Reading the same sequence again must not advance the consecutive-cycle count.
+  EXPECT_EQ(
+    system_.read(rclcpp::Time(0), rclcpp::Duration(0, 0)),
+    hardware_interface::return_type::OK);
+  EXPECT_EQ(state_->quick_stop_calls, 0);
+
+  ++state_->snapshot.sequence;
+  state_->snapshot.stamp = std::chrono::steady_clock::now();
+  EXPECT_EQ(
+    system_.read(rclcpp::Time(0), rclcpp::Duration(0, 0)),
+    hardware_interface::return_type::ERROR);
+  EXPECT_EQ(state_->quick_stop_calls, 1);
+}
+
 TEST_F(MiraculousSystemTest, StaleFeedbackAndMotorFaultQuickStop)
 {
   initializeAndConfigure();
@@ -322,6 +377,49 @@ TEST(MiraculousSystemValidationTest, RejectsNegativeBaudrateBeforeOpeningHardwar
     [state]() {return std::make_unique<FakeArm>(state);});
   auto info = makeHardwareInfo();
   info.hardware_parameters["baudrate"] = "-1";
+  ASSERT_EQ(system.on_init(info), hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_EQ(
+    system.on_configure(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::ERROR);
+  EXPECT_EQ(state->init_calls, 0);
+}
+
+TEST(MiraculousSystemValidationTest, RejectsTimerSyncForFullArmBeforeOpeningHardware)
+{
+  auto state = std::make_shared<FakeState>();
+  MiraculousSystem system(
+    [state]() {return std::make_unique<FakeArm>(state);});
+  auto info = makeHardwareInfo();
+  info.hardware_parameters["sync_period_us"] = "20000";
+  ASSERT_EQ(system.on_init(info), hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_EQ(
+    system.on_configure(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::ERROR);
+  EXPECT_EQ(state->init_calls, 0);
+}
+
+TEST(MiraculousSystemValidationTest, RejectsDisabledSafetyMonitorBeforeOpeningHardware)
+{
+  auto state = std::make_shared<FakeState>();
+  MiraculousSystem system(
+    [state]() {return std::make_unique<FakeArm>(state);});
+  auto info = makeHardwareInfo();
+  info.hardware_parameters["enable_emcy_monitor"] = "false";
+  ASSERT_EQ(system.on_init(info), hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_EQ(
+    system.on_configure(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::ERROR);
+  EXPECT_EQ(state->init_calls, 0);
+}
+
+TEST(MiraculousSystemValidationTest, RejectsDisabledFullArmWatchdogBeforeOpeningHardware)
+{
+  auto state = std::make_shared<FakeState>();
+  MiraculousSystem system(
+    [state]() {return std::make_unique<FakeArm>(state);});
+  auto info = makeHardwareInfo();
+  info.hardware_parameters["max_following_error_rad"] = "0.0";
+  info.hardware_parameters["following_error_cycles"] = "0";
   ASSERT_EQ(system.on_init(info), hardware_interface::CallbackReturn::SUCCESS);
   EXPECT_EQ(
     system.on_configure(rclcpp_lifecycle::State()),

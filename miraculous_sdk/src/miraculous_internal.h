@@ -9,6 +9,8 @@
 
 #include "miraculous_sdk.h"
 
+#include <limits.h>
+#include <math.h>
 #include <pthread.h>
 #include <time.h>
 #define MOTION_SDO_TIMEOUT_MS  500
@@ -23,8 +25,26 @@
  *----------------------------------------------------------------------------*/
 #define POS_TO_DEG(pos, bw)     ((float)(pos) * (360.0f / (float)((uint32_t)1 << (bw))))
 #define POS_TO_RAD(pos, bw)     ((float)(pos) * (6.283185307179586f / (float)((uint32_t)1 << (bw))))
-#define DEG_TO_POS(deg, bw)     ((int32_t)((deg) * (float)((uint32_t)1 << (bw)) / 360.0f))
-#define RAD_TO_POS(rad, bw)     ((int32_t)((rad) * (float)((uint32_t)1 << (bw)) / 6.283185307179586f))
+
+static inline int miraculous_position_to_counts(float position, PosUnit_t unit,
+                                                 uint8_t encoder_bw,
+                                                 int32_t *counts)
+{
+    if (!counts || !isfinite(position) || encoder_bw == 0 || encoder_bw > 31 ||
+        (unit != POS_UNIT_DEGREE && unit != POS_UNIT_RADIAN))
+        return MRC_ERROR_INVALID_PARAM;
+
+    const double counts_per_rev = (double)((uint32_t)1U << encoder_bw);
+    const double revolution = unit == POS_UNIT_RADIAN ?
+        6.283185307179586 : 360.0;
+    const double converted = (double)position * counts_per_rev / revolution;
+    if (!isfinite(converted) || converted < (double)INT32_MIN ||
+        converted > (double)INT32_MAX)
+        return MRC_ERROR_INVALID_PARAM;
+
+    *counts = (int32_t)converted;
+    return MRC_SUCCESS;
+}
 
 /*----------------------------------------------------------------------------
  * CANopen 预定义 COB-ID 偏移 (CiA 301) — 内部使用
@@ -115,6 +135,7 @@ struct MiraCoMaster {
 
     /* 电机索引表 (节点 ID → MiraMotor*, 用于异步 SDO 分发) */
     struct MiraMotor *motor_by_node[128];
+    pthread_mutex_t motor_registry_lock; /* 保护 motor_by_node 与句柄生命周期 */
 
     /* 每节点 SDO 锁 (同步模式, 不同节点可并行 SDO) */
     pthread_mutex_t sdo_node_lock[128];
@@ -130,8 +151,8 @@ struct MiraCoMaster {
 
     /* 接收线程 */
     pthread_t       recv_thread;
-    volatile bool   recv_running;  /* 线程已初始化并运行 */
-    volatile bool   recv_stop;     /* 请求线程停止 */
+    bool            recv_running;  /* 通过 __atomic_* 访问 */
+    bool            recv_stop;     /* 通过 __atomic_* 访问 */
 };
 
 /*----------------------------------------------------------------------------
@@ -250,6 +271,7 @@ struct MiraMotor {
     MiraSdoAsyncTask *sdo_async_list;
     pthread_mutex_t   sdo_async_lock;  /* 保护异步任务链表 */
     int               sdo_async_tid_seed; /* 自增事务 ID */
+    pthread_mutex_t   callback_lock;   /* 保护用户 TPDO callback/data */
 };
 
 /*----------------------------------------------------------------------------
@@ -306,6 +328,9 @@ int  miraculous_co_pdo_send(MiraCoMaster *co, uint8_t pdo_num, uint32_t cob_id,
 int  miraculous_co_pdo_set_tpdo_callback(MiraCoMaster *co, uint8_t node_id,
                                           uint8_t pdo_num, uint32_t cob_id,
                                           MiraTpdoCallback cb, void *user_data);
+int  miraculous_co_pdo_remove_tpdo_callbacks(MiraCoMaster *co,
+                                              uint8_t node_id,
+                                              void *user_data);
 
 int  miraculous_co_sync_start(MiraCoMaster *co, uint32_t period_us);
 int  miraculous_co_sync_stop(MiraCoMaster *co);

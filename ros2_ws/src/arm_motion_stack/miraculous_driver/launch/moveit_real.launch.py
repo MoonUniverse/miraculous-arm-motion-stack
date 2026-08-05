@@ -79,6 +79,12 @@ def _launch_setup(context):
                     str(profile.feedback_stale_timeout_ms),
                     " enable_emcy_monitor:=",
                     str(profile.enable_emcy_monitor).lower(),
+                    " max_command_step_rad:=",
+                    str(profile.max_command_step_rad),
+                    " max_following_error_rad:=",
+                    str(profile.max_following_error_rad),
+                    " following_error_cycles:=",
+                    str(profile.following_error_cycles),
                     " require_full_arm:=true",
                     " require_position_limits:=true",
                 ]

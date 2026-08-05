@@ -6,7 +6,7 @@ SDK 对外只暴露一个头文件 `miraculous_sdk.h`，包含以下三层的全
 
 | API / 宏 | 说明 |
 | --- | --- |
-| `MIRACULOUS_SDK_VERSION` | 版本号字符串，如 `"1.0.0"` |
+| `MIRACULOUS_SDK_VERSION` | 版本号字符串，如 `"1.1.0"` |
 | `MIRACULOUS_SDK_VERSION_MAJOR` | 主版本号 |
 | `MIRACULOUS_SDK_VERSION_MINOR` | 次版本号 |
 | `MIRACULOUS_SDK_VERSION_PATCH` | 修订号 |
