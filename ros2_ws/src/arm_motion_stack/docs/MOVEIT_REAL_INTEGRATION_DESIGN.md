@@ -744,6 +744,15 @@ colcon test-result \
 ROS 2 Humble 板上工作区重新执行本节的 clean build、`colcon test` 与
 `colcon test-result --verbose`，保存新的零失败证据后才能进入真机激活。
 
+2026-08-05 safety review 分支已在全新 SDK/ROS 构建目录中复核：
+
+```text
+65 tests, 0 errors, 0 failures, 0 skipped
+```
+
+其中新增回归确认 configure/初始反馈越限后的 pre-activation error transition
+只关闭 SDK，不发送 quick-stop，也不锁存一次并不存在的运行时硬件故障。
+
 real xacro 还需生成 URDF 并执行：
 
 ```bash

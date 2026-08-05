@@ -445,7 +445,15 @@ hardware_interface::CallbackReturn MiraculousSystem::on_shutdown(
 hardware_interface::CallbackReturn MiraculousSystem::on_error(
   const rclcpp_lifecycle::State &)
 {
-  fail_safe_stop("ros2_control entered the hardware error transition");
+  if (active_ || fault_latched_) {
+    fail_safe_stop("ros2_control entered the hardware error transition");
+  } else {
+    RCLCPP_WARN(
+      rclcpp::get_logger("MiraculousSystem"),
+      "Hardware error transition occurred before activation. Shutting down "
+      "the SDK without quick-stop or a runtime fault latch because no drive "
+      "was enabled.");
+  }
   shutdown_arm();
   return hardware_interface::CallbackReturn::SUCCESS;
 }

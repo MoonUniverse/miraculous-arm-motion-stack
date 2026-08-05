@@ -442,5 +442,31 @@ TEST(MiraculousSystemValidationTest, RejectsUnsafePositionAtConfigure)
   EXPECT_EQ(state->shutdown_calls, 1);
 }
 
+TEST(MiraculousSystemValidationTest, PreActivationErrorDoesNotQuickStopOrLatchRuntimeFault)
+{
+  auto state = std::make_shared<FakeState>();
+  state->snapshot.positions_rad[0] = 1.2;
+  MiraculousSystem system(
+    [state]() {return std::make_unique<FakeArm>(state);});
+  ASSERT_EQ(
+    system.on_init(makeHardwareInfo()),
+    hardware_interface::CallbackReturn::SUCCESS);
+  ASSERT_EQ(
+    system.on_configure(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::ERROR);
+  EXPECT_EQ(state->quick_stop_calls, 0);
+  EXPECT_EQ(
+    system.on_error(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_EQ(state->quick_stop_calls, 0);
+
+  state->snapshot.positions_rad[0] = 0.1;
+  state->snapshot.stamp = std::chrono::steady_clock::now();
+  EXPECT_EQ(
+    system.on_configure(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_EQ(state->init_calls, 2);
+}
+
 }  // namespace
 }  // namespace miraculous_driver
