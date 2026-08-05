@@ -18,6 +18,10 @@
   <xacro:arg name="max_command_step_rad" default="0.005"/>
   <xacro:arg name="max_following_error_rad" default="0.05"/>
   <xacro:arg name="following_error_cycles" default="3"/>
+  <xacro:arg name="remote_heartbeat_topic" default="/arm_remote_control/heartbeat"/>
+  <xacro:arg name="remote_profile_fingerprint" default="disabled"/>
+  <xacro:arg name="remote_watchdog_timeout_ms" default="0"/>
+  <xacro:arg name="remote_stop_velocity_threshold_rad_s" default="0.02"/>
   <xacro:arg name="require_full_arm" default="false"/>
   <xacro:arg name="require_position_limits" default="false"/>
 
@@ -54,6 +58,10 @@
     max_command_step_rad="$(arg max_command_step_rad)"
     max_following_error_rad="$(arg max_following_error_rad)"
     following_error_cycles="$(arg following_error_cycles)"
+    remote_heartbeat_topic="$(arg remote_heartbeat_topic)"
+    remote_profile_fingerprint="$(arg remote_profile_fingerprint)"
+    remote_watchdog_timeout_ms="$(arg remote_watchdog_timeout_ms)"
+    remote_stop_velocity_threshold_rad_s="$(arg remote_stop_velocity_threshold_rad_s)"
     require_full_arm="$(arg require_full_arm)"
     require_position_limits="$(arg require_position_limits)"/>
 </robot>

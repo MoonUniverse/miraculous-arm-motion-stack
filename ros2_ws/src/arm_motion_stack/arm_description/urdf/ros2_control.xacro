@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
-  <xacro:macro name="arm_ros2_control" params="name hardware_type can_interface baudrate encoder_bw reduction_ratio node_ids joint_indices position_min position_max sync_period_us read_rate_hz state_poll_rate_hz manual_feedback_timeout_ms feedback_stale_timeout_ms enable_emcy_monitor max_command_step_rad max_following_error_rad following_error_cycles require_full_arm require_position_limits">
+  <xacro:macro name="arm_ros2_control" params="name hardware_type can_interface baudrate encoder_bw reduction_ratio node_ids joint_indices position_min position_max sync_period_us read_rate_hz state_poll_rate_hz manual_feedback_timeout_ms feedback_stale_timeout_ms enable_emcy_monitor max_command_step_rad max_following_error_rad following_error_cycles remote_heartbeat_topic remote_profile_fingerprint remote_watchdog_timeout_ms remote_stop_velocity_threshold_rad_s require_full_arm require_position_limits">
     <ros2_control name="${name}" type="system">
       <hardware>
         <xacro:if value="${hardware_type == 'fake'}">
@@ -37,6 +37,10 @@
           <param name="max_command_step_rad">${max_command_step_rad}</param>
           <param name="max_following_error_rad">${max_following_error_rad}</param>
           <param name="following_error_cycles">${following_error_cycles}</param>
+          <param name="remote_heartbeat_topic">${remote_heartbeat_topic}</param>
+          <param name="remote_profile_fingerprint">${remote_profile_fingerprint}</param>
+          <param name="remote_watchdog_timeout_ms">${remote_watchdog_timeout_ms}</param>
+          <param name="remote_stop_velocity_threshold_rad_s">${remote_stop_velocity_threshold_rad_s}</param>
           <param name="require_full_arm">${require_full_arm}</param>
           <param name="require_position_limits">${require_position_limits}</param>
         </xacro:if>

@@ -277,6 +277,29 @@ TEST_F(MiraculousSystemTest, SingleCycleCommandJumpFailsBeforeSdkWrite)
   EXPECT_EQ(state_->quick_stop_calls, 1);
 }
 
+TEST_F(MiraculousSystemTest, ActiveReadPreservesTheLastPositionCommand)
+{
+  initializeAndConfigure();
+  ASSERT_EQ(
+    system_.on_activate(rclcpp_lifecycle::State()),
+    hardware_interface::CallbackReturn::SUCCESS);
+
+  auto commands = system_.export_command_interfaces();
+  commands[0].set_value(0.102);
+  ASSERT_EQ(
+    system_.write(rclcpp::Time(0), rclcpp::Duration(0, 0)),
+    hardware_interface::return_type::OK);
+
+  state_->snapshot.positions_rad[0] = 0.101;
+  ++state_->snapshot.sequence;
+  state_->snapshot.stamp = std::chrono::steady_clock::now();
+  ASSERT_EQ(
+    system_.read(rclcpp::Time(0), rclcpp::Duration(0, 0)),
+    hardware_interface::return_type::OK);
+
+  EXPECT_DOUBLE_EQ(commands[0].get_value(), 0.102);
+}
+
 TEST_F(MiraculousSystemTest, FollowingErrorCountsOnlyDistinctFeedbackSets)
 {
   auto info = makeHardwareInfo();

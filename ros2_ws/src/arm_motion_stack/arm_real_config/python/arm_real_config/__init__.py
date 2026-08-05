@@ -1,6 +1,6 @@
-"""Compatibility imports for the shared real-arm profile package."""
+"""Shared, hardware-independent configuration for real-arm deployments."""
 
-from arm_real_config.real_arm_profile import (
+from .real_arm_profile import (
     JOINT_NAMES,
     RealArmProfile,
     RealJointConfig,

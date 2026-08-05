@@ -20,6 +20,25 @@ namespace
 {
 constexpr double kSeedWaitSec = 0.25;
 
+int64_t steady_now_ns()
+{
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool is_sha256(const std::string & value)
+{
+  if (value.size() != 64) {
+    return false;
+  }
+  return std::all_of(
+    value.begin(), value.end(),
+    [](const char character) {
+      return (character >= '0' && character <= '9') ||
+             (character >= 'a' && character <= 'f');
+    });
+}
+
 std::string trim(const std::string & input)
 {
   const auto first = std::find_if_not(
@@ -81,6 +100,11 @@ MiraculousSystem::MiraculousSystem()
 MiraculousSystem::MiraculousSystem(ArmFactory arm_factory)
 : arm_factory_(std::move(arm_factory))
 {
+}
+
+MiraculousSystem::~MiraculousSystem()
+{
+  stop_remote_watchdog();
 }
 
 hardware_interface::CallbackReturn MiraculousSystem::on_init(
@@ -192,12 +216,20 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
     const int manual_timeout = parse_int_param("manual_feedback_timeout_ms", 15);
     const int stale_timeout = parse_int_param("feedback_stale_timeout_ms", 30);
     const int following_error_cycles = parse_int_param("following_error_cycles", 0);
+    const int remote_watchdog_timeout = parse_int_param(
+      "remote_watchdog_timeout_ms", 0);
     config.read_rate_hz = parse_double_param("read_rate_hz", 50.0);
     config.state_poll_rate_hz = parse_double_param("state_poll_rate_hz", 0.0);
     config.reduction_ratio = parse_double_param("reduction_ratio", 100.0);
     config.enable_emcy_monitor = parse_bool_param("enable_emcy_monitor", true);
     max_command_step_rad_ = parse_double_param("max_command_step_rad", 0.0);
     max_following_error_rad_ = parse_double_param("max_following_error_rad", 0.0);
+    remote_stop_velocity_threshold_rad_s_ = parse_double_param(
+      "remote_stop_velocity_threshold_rad_s", 0.02);
+    remote_heartbeat_topic_ = parse_string_param(
+      "remote_heartbeat_topic", "/arm_remote_control/heartbeat");
+    remote_profile_fingerprint_ = parse_string_param(
+      "remote_profile_fingerprint", "disabled");
     const bool require_full_arm = parse_bool_param("require_full_arm", false);
     const bool require_limits = parse_bool_param("require_position_limits", false);
 
@@ -208,11 +240,19 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
       !std::isfinite(config.reduction_ratio) || config.reduction_ratio <= 0.0 ||
       !std::isfinite(max_command_step_rad_) || max_command_step_rad_ < 0.0 ||
       !std::isfinite(max_following_error_rad_) || max_following_error_rad_ < 0.0 ||
+      remote_watchdog_timeout < 0 ||
+      !std::isfinite(remote_stop_velocity_threshold_rad_s_) ||
+      remote_stop_velocity_threshold_rad_s_ <= 0.0 ||
       following_error_cycles < 0 ||
       ((max_following_error_rad_ > 0.0) != (following_error_cycles > 0)))
     {
       throw std::invalid_argument(
               "invalid hardware rates, timeouts, encoder, baudrate, or reduction ratio");
+    }
+    if (remote_watchdog_timeout > 0 && !is_sha256(remote_profile_fingerprint_)) {
+      throw std::invalid_argument(
+              "remote_profile_fingerprint must be a lowercase SHA-256 value when "
+              "remote_watchdog_timeout_ms is enabled");
     }
     if (require_full_arm && sync_period_us != 0) {
       throw std::invalid_argument(
@@ -240,6 +280,7 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
     config.max_following_error_rad = max_following_error_rad_;
     config.following_error_cycles = static_cast<uint32_t>(following_error_cycles);
     feedback_stale_timeout_ = std::chrono::milliseconds(stale_timeout);
+    remote_watchdog_timeout_ = std::chrono::milliseconds(remote_watchdog_timeout);
 
     const std::vector<int> node_ids = parse_int_list_param(
       "node_ids", {1, 2, 3, 4, 5, 6});
@@ -346,17 +387,20 @@ hardware_interface::CallbackReturn MiraculousSystem::on_configure(
     last_following_sequence_ = snapshot.sequence;
     stop_issued_ = false;
     active_ = false;
+    start_remote_watchdog();
 
     RCLCPP_INFO(
       rclcpp::get_logger("MiraculousSystem"),
-      "Configured inactive: can=%s mapped_joints=%zu stale_timeout_ms=%d. "
-      "No drive was enabled.",
-      config.can_interface.c_str(), config.joints.size(), stale_timeout);
+      "Configured inactive: can=%s mapped_joints=%zu stale_timeout_ms=%d "
+      "remote_watchdog_ms=%d. No drive was enabled.",
+      config.can_interface.c_str(), config.joints.size(), stale_timeout,
+      remote_watchdog_timeout);
     return hardware_interface::CallbackReturn::SUCCESS;
   } catch (const std::exception & error) {
     RCLCPP_FATAL(
       rclcpp::get_logger("MiraculousSystem"),
       "Configuration rejected: %s", error.what());
+    stop_remote_watchdog();
     shutdown_arm();
     return hardware_interface::CallbackReturn::ERROR;
   }
@@ -369,6 +413,13 @@ hardware_interface::CallbackReturn MiraculousSystem::on_activate(
     RCLCPP_FATAL(
       rclcpp::get_logger("MiraculousSystem"),
       "Activation rejected: hardware is missing or a fault is latched.");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  if (!remote_heartbeat_is_fresh()) {
+    RCLCPP_FATAL(
+      rclcpp::get_logger("MiraculousSystem"),
+      "Activation rejected: no fresh heartbeat with the expected real-arm "
+      "profile fingerprint was received from the external PC.");
     return hardware_interface::CallbackReturn::ERROR;
   }
 
@@ -427,6 +478,7 @@ hardware_interface::CallbackReturn MiraculousSystem::on_cleanup(
   const rclcpp_lifecycle::State &)
 {
   active_ = false;
+  stop_remote_watchdog();
   shutdown_arm();
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -438,6 +490,7 @@ hardware_interface::CallbackReturn MiraculousSystem::on_shutdown(
     arm_->quick_stop();
   }
   active_ = false;
+  stop_remote_watchdog();
   shutdown_arm();
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -454,6 +507,7 @@ hardware_interface::CallbackReturn MiraculousSystem::on_error(
       "the SDK without quick-stop or a runtime fault latch because no drive "
       "was enabled.");
   }
+  stop_remote_watchdog();
   shutdown_arm();
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -510,6 +564,29 @@ hardware_interface::return_type MiraculousSystem::read(
     }
     return hardware_interface::return_type::OK;
   }
+  if (active_ && !remote_heartbeat_is_fresh()) {
+    bool still_moving = false;
+    for (size_t index = 0; index < kArmJoints; ++index) {
+      if (configured_joints_[index] &&
+        std::abs(snapshot.velocities_rad_s[index]) >
+        remote_stop_velocity_threshold_rad_s_)
+      {
+        still_moving = true;
+        break;
+      }
+    }
+    if (still_moving) {
+      fail_safe_stop(
+        "external PC heartbeat exceeded the hard timeout while the arm was still moving");
+      return hardware_interface::return_type::ERROR;
+    }
+    if (!remote_stale_reported_.exchange(true, std::memory_order_acq_rel)) {
+      RCLCPP_WARN(
+        rclcpp::get_logger("MiraculousSystem"),
+        "External PC heartbeat is stale, but the arm is stationary. Holding the "
+        "last local CSP position; new motion will trigger Quick Stop.");
+    }
+  }
   if (active_ && !following_error_is_safe(snapshot, unsafe_reason)) {
     fail_safe_stop("feedback rejected: " + unsafe_reason);
     return hardware_interface::return_type::ERROR;
@@ -526,6 +603,11 @@ hardware_interface::return_type MiraculousSystem::write(
   }
   if (emcy_latched_.load(std::memory_order_acquire) || arm_->has_fault()) {
     fail_safe_stop("fault detected before command write");
+    return hardware_interface::return_type::ERROR;
+  }
+  if (!remote_heartbeat_is_fresh() && remote_command_advanced()) {
+    fail_safe_stop(
+      "external PC heartbeat exceeded the hard timeout while trajectory commands advanced");
     return hardware_interface::return_type::ERROR;
   }
 
@@ -648,7 +730,13 @@ void MiraculousSystem::apply_snapshot(const FeedbackSnapshot & snapshot)
     }
     position_states_[index] = snapshot.positions_rad[index];
     velocity_states_[index] = snapshot.velocities_rad_s[index];
-    position_commands_[index] = snapshot.positions_rad[index];
+    // Seed commands from feedback only while the hardware is inactive.  Once
+    // active, preserving the last command is what lets an inactive JTC hold
+    // the stopped pose instead of making the CSP target follow gravity-driven
+    // feedback on every read cycle.
+    if (!active_) {
+      position_commands_[index] = snapshot.positions_rad[index];
+    }
   }
 }
 
@@ -666,6 +754,131 @@ void MiraculousSystem::fail_safe_stop(const std::string & reason)
       "and controller_manager restart are required.",
       reason.c_str(), stopped ? "success" : "failure");
   }
+}
+
+void MiraculousSystem::start_remote_watchdog()
+{
+  stop_remote_watchdog();
+  last_remote_heartbeat_ns_.store(0, std::memory_order_release);
+  remote_heartbeat_seen_.store(false, std::memory_order_release);
+  remote_stale_reported_.store(false, std::memory_order_release);
+  if (remote_watchdog_timeout_.count() <= 0) {
+    return;
+  }
+  if (!rclcpp::ok()) {
+    throw std::runtime_error(
+            "rclcpp is not running; cannot start the remote heartbeat guard");
+  }
+
+  rclcpp::NodeOptions node_options;
+  node_options.use_global_arguments(false);
+  remote_watchdog_node_ = std::make_shared<rclcpp::Node>(
+    "miraculous_remote_heartbeat_guard", node_options);
+  auto qos = rclcpp::QoS(rclcpp::KeepLast(1));
+  qos.best_effort();
+  qos.durability_volatile();
+  remote_heartbeat_subscription_ =
+    remote_watchdog_node_->create_subscription<std_msgs::msg::String>(
+    remote_heartbeat_topic_, qos,
+    [this](std_msgs::msg::String::ConstSharedPtr message) {
+      if (message->data != remote_profile_fingerprint_) {
+        RCLCPP_ERROR_THROTTLE(
+          remote_watchdog_node_->get_logger(),
+          *remote_watchdog_node_->get_clock(), 2000,
+          "Ignoring remote heartbeat with a mismatched real-arm profile fingerprint");
+        return;
+      }
+      last_remote_heartbeat_ns_.store(steady_now_ns(), std::memory_order_release);
+      remote_heartbeat_seen_.store(true, std::memory_order_release);
+      remote_stale_reported_.store(false, std::memory_order_release);
+    });
+
+  remote_watchdog_executor_ =
+    std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
+  remote_watchdog_executor_->add_node(remote_watchdog_node_);
+  remote_watchdog_thread_ = std::thread(
+    [this]() {
+      try {
+        remote_watchdog_executor_->spin();
+      } catch (const std::exception & error) {
+        last_remote_heartbeat_ns_.store(0, std::memory_order_release);
+        remote_heartbeat_seen_.store(false, std::memory_order_release);
+        RCLCPP_ERROR(
+          rclcpp::get_logger("MiraculousSystem"),
+          "Remote heartbeat guard thread failed: %s", error.what());
+      }
+    });
+
+  RCLCPP_INFO(
+    rclcpp::get_logger("MiraculousSystem"),
+    "Hard remote heartbeat guard enabled: topic=%s timeout_ms=%lld",
+    remote_heartbeat_topic_.c_str(),
+    static_cast<long long>(remote_watchdog_timeout_.count()));
+}
+
+void MiraculousSystem::stop_remote_watchdog() noexcept
+{
+  if (remote_watchdog_executor_) {
+    try {
+      remote_watchdog_executor_->cancel();
+    } catch (const std::exception & error) {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("MiraculousSystem"),
+        "Failed to cancel remote heartbeat executor: %s", error.what());
+    }
+  }
+  if (remote_watchdog_thread_.joinable()) {
+    try {
+      remote_watchdog_thread_.join();
+    } catch (const std::exception & error) {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("MiraculousSystem"),
+        "Failed to join remote heartbeat thread: %s", error.what());
+    }
+  }
+  if (remote_watchdog_executor_ && remote_watchdog_node_) {
+    try {
+      remote_watchdog_executor_->remove_node(remote_watchdog_node_);
+    } catch (const std::exception & error) {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("MiraculousSystem"),
+        "Failed to remove remote heartbeat node: %s", error.what());
+    }
+  }
+  remote_heartbeat_subscription_.reset();
+  remote_watchdog_node_.reset();
+  remote_watchdog_executor_.reset();
+  last_remote_heartbeat_ns_.store(0, std::memory_order_release);
+  remote_heartbeat_seen_.store(false, std::memory_order_release);
+}
+
+bool MiraculousSystem::remote_heartbeat_is_fresh() const
+{
+  if (remote_watchdog_timeout_.count() <= 0) {
+    return true;
+  }
+  if (!remote_heartbeat_seen_.load(std::memory_order_acquire)) {
+    return false;
+  }
+  const int64_t last_ns = last_remote_heartbeat_ns_.load(std::memory_order_acquire);
+  const int64_t timeout_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    remote_watchdog_timeout_).count();
+  return last_ns > 0 && steady_now_ns() - last_ns <= timeout_ns;
+}
+
+bool MiraculousSystem::remote_command_advanced() const
+{
+  if (!last_command_valid_) {
+    return true;
+  }
+  for (size_t index = 0; index < kArmJoints; ++index) {
+    if (configured_joints_[index] &&
+      std::abs(position_commands_[index] - last_sent_commands_[index]) > 1e-9)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 void MiraculousSystem::shutdown_arm()

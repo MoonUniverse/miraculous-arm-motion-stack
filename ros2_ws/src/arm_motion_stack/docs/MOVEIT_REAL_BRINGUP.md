@@ -2,16 +2,18 @@
 
 更新日期：2026-08-05
 
-本文是 `J1..J6` 六轴机械臂首次通过 MoveIt 驱动真机的唯一操作入口。
+本文是 `J1..J6` 六轴机械臂首次通过 MoveIt 驱动真机的操作入口。
 第一阶段只验收关节空间的小步运动、取消和故障停机，不执行位姿目标或笛卡尔
 轨迹。当前 `tool0` 仍是零偏移占位坐标系，不能作为真实 TCP 使用。
 
 整体架构、命令/反馈/故障数据流和分层测试依据见：
-`docs/MOVEIT_REAL_INTEGRATION_DESIGN.md`。
+`docs/MOVEIT_REAL_INTEGRATION_DESIGN.md`。板端/PC 拆分、DDS 与双机验收细节见
+`docs/REMOTE_MOVEIT_DEPLOYMENT.md`。
 
 ## 1. 已实现的安全边界
 
-- `moveit_real.launch.py` 只接受完整六轴 profile。
+- 板端 `real_control_board.launch.py` 和 PC 端
+  `moveit_remote_pc.launch.py` 都只接受完整六轴 profile。
 - 生产 profile 默认 `calibrated: false`，其中限位和看门狗只是待验收值；未完成
   六轴复核时 launch 会在打开 CAN 或使能电机之前失败。
 - launch 后 `ARMSystem` 是 `inactive`，`arm_controller` 也是 `inactive`。
@@ -44,7 +46,8 @@ cmake --build miraculous_sdk/build -j
 cd ros2_ws
 colcon build --symlink-install \
   --packages-up-to \
-    arm_description arm_moveit_config arm_planning_examples miraculous_driver
+    arm_real_config arm_remote_control arm_description arm_moveit_config \
+    arm_planning_examples miraculous_driver
 source install/setup.bash
 ```
 
@@ -52,7 +55,7 @@ source install/setup.bash
 全新的 build/install/log 目录。构建后应确认：
 
 ```bash
-colcon test --packages-select miraculous_driver
+colcon test --packages-select arm_real_config miraculous_driver
 colcon test-result --verbose
 ```
 
@@ -102,7 +105,7 @@ ros2 service call /teach_record/stop std_srvs/srv/Trigger
 写入：
 
 ```text
-src/arm_motion_stack/miraculous_driver/config/real_arm_profile.yaml
+src/arm_motion_stack/arm_real_config/config/real_arm_profile.yaml
 ```
 
 每个关节都必须满足：
@@ -128,25 +131,37 @@ ip -details link show can1
 
 ```bash
 python3 -c \
-  "from miraculous_driver.real_arm_profile import load_real_arm_profile; \
-p=load_real_arm_profile('install/miraculous_driver/share/miraculous_driver/config/real_arm_profile.yaml'); \
-print(p.node_ids_csv, p.position_min_csv, p.position_max_csv)"
+  "from arm_real_config import load_real_arm_profile; \
+p=load_real_arm_profile('install/arm_real_config/share/arm_real_config/config/real_arm_profile.yaml'); \
+print(p.node_ids_csv, p.position_min_csv, p.position_max_csv, p.fingerprint)"
 ```
 
 ## 5. 启动，但不使能
 
+先在机械臂板端启动本地控制链：
+
 ```bash
-ROS_LOG_DIR=/tmp/ros-log \
-ros2 launch miraculous_driver moveit_real.launch.py use_rviz:=true
+ROS_LOG_DIR=/tmp/ros-log-board \
+ros2 launch miraculous_driver real_control_board.launch.py
 ```
 
-此时允许启动的是状态发布、controller manager、MoveGroup 和 RViz，不允许电机
-进入 Operation Enabled。检查：
+再在外部 PC 启动 MoveIt 与 RViz：
+
+```bash
+ROS_LOG_DIR=/tmp/ros-log-pc \
+ros2 launch arm_moveit_config moveit_remote_pc.launch.py use_rviz:=true
+```
+
+两端打印的 profile SHA-256 指纹必须完全相同。PC 心跳会携带该指纹，板端只接受
+完全匹配的心跳；此时允许启动的是状态发布、controller manager、MoveGroup、RViz
+和失联监督器，不允许电机进入 Operation Enabled。
+在板端检查：
 
 ```bash
 ros2 control list_hardware_components
 ros2 control list_controllers
 ros2 topic echo /arm_joint_states --once
+ros2 topic echo /remote_motion_watchdog/state --once
 ```
 
 预期：
@@ -154,6 +169,7 @@ ros2 topic echo /arm_joint_states --once
 - `ARMSystem` 为 `inactive`；
 - `joint_state_broadcaster` 为 `active`；
 - `arm_controller` 为 `inactive`；
+- `remote_motion_watchdog` 为 `MONITORING`；
 - `/arm_joint_states` 包含且只包含 `J1..J6`，值有限并与实机姿态一致。
 
 MoveIt 的 `No 3D sensor plugin(s) defined for octomap updates` 警告在当前无深度
@@ -161,12 +177,15 @@ MoveIt 的 `No 3D sensor plugin(s) defined for octomap updates` 警告在当前�
 
 ## 6. 人工激活
 
-急停人员就位，确认 RViz 当前姿态与实机一致后，严格按顺序执行：
+急停人员就位，确认 RViz 当前姿态与实机一致后，严格在板端本地终端按顺序执行：
 
 ```bash
 ros2 control set_hardware_component_state ARMSystem active
 ros2 control switch_controllers --activate arm_controller --strict
 ```
+
+如果匹配心跳不新鲜，`MiraculousSystem` 会拒绝从 inactive 进入 active；不得绕过该
+检查。执行期间 PC 心跳超时会取消当前轨迹并停用 JTC，恢复通信也不会自动续跑。
 
 再检查：
 
@@ -259,7 +278,8 @@ ros2 control set_hardware_component_state ARMSystem inactive
 目标写入失败、驱动器 fault、意外运动、quick-stop 结果失败。
 
 1. 按现场急停或安全断能流程确保机械臂不会继续运动。
-2. 退出整个 `moveit_real.launch.py`；不要在原进程里 cleanup/reconfigure。
+2. 退出板端 `real_control_board.launch.py` 和 PC 端
+   `moveit_remote_pc.launch.py`；不要在原进程里 cleanup/reconfigure。
 3. 检查 CAN、驱动器状态字、供电、编码器和机械干涉。
 4. 使用驱动器厂家工具或断电流程完成外部 fault reset。
 5. 从第 3 节重新检查并启动。

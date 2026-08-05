@@ -40,6 +40,7 @@ find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 
 # ---- Core + plugin shared library ----
@@ -66,6 +67,7 @@ ament_target_dependencies(${PROJECT_NAME}
   rclcpp
   rclcpp_lifecycle
   sensor_msgs
+  std_msgs
 )
 # Runtime: find libmiraculous_sdk.so next to this library ($ORIGIN).
 set_target_properties(${PROJECT_NAME} PROPERTIES
@@ -97,9 +99,6 @@ set_target_properties(trajectory_tracking_test_node PROPERTIES INSTALL_RPATH "$O
 # ---- tests -----------------------------------------------------------------
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  find_package(ament_cmake_pytest REQUIRED)
-
-  ament_add_pytest_test(test_real_arm_profile test/test_real_arm_profile.py)
 
   ament_add_gtest(test_enable_csp
     test/test_enable_csp.cpp
@@ -202,6 +201,7 @@ ament_export_dependencies(
   rclcpp
   rclcpp_lifecycle
   sensor_msgs
+  std_msgs
   std_srvs
 )
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-08-05
+
+### Split Real-Hardware Board / MoveIt PC Deployment
+
+- Added hardware-independent `arm_real_config`; it is now the single source for
+  the calibrated real-arm profile, strict validation, MoveIt limits, shared
+  real-xacro arguments, and a deterministic deployment fingerprint.
+- Added `miraculous_driver/real_control_board.launch.py` for board-local
+  robot_state_publisher, ros2_control, JTC, Driver, SDK, and CAN ownership.
+- Added `arm_moveit_config/moveit_remote_pc.launch.py` for remote MoveGroup and
+  RViz without a Miraculous SDK dependency.
+- Both launch paths fail closed on an uncalibrated profile and print the same
+  SHA-256 profile fingerprint for pre-activation comparison.
+- Explicitly selected
+  `moveit_simple_controller_manager/MoveItSimpleControllerManager` in the
+  MoveIt controller configuration.
+- Added deployment-contract tests and a dual-host build, DDS, bring-up, and
+  validation runbook in `docs/REMOTE_MOVEIT_DEPLOYMENT.md`.
+- Kept `miraculous_driver/moveit_real.launch.py` as the single-host compatibility
+  path; production deployment uses the two new entry points.
+- Added hardware-independent `arm_remote_control`: the PC publishes a
+  profile-bound volatile heartbeat, and the board cancels the active trajectory
+  then deactivates JTC when that heartbeat times out.
+- Added a second, independent heartbeat guard inside `MiraculousSystem`.
+  Hardware activation now requires a fresh matching heartbeat; if the soft stop
+  does not settle the arm before the hard timeout, the existing verified
+  CiA402 Quick Stop path is used.
+- Lost-PC faults remain latched after reconnection and require board-local reset
+  plus explicit controller reactivation.
+
 ## 2026-07-06
 
 ### Miraculous SDK Consolidation

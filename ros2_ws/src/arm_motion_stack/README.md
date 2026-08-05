@@ -79,6 +79,10 @@ base_link
 ## Packages
 
 - `arm_description`: URDF/xacro, meshes, RViz display.
+- `arm_real_config`: hardware-independent real-arm profile, strict validation,
+  shared xacro arguments, and deployment fingerprint.
+- `arm_remote_control`: PC heartbeat plus board-side trajectory cancellation,
+  controller deactivation, and latched disconnect handling.
 - `arm_moveit_config`: SRDF, kinematics, OMPL, joint limits, MoveIt launch.
 - `arm_control`: ros2_control fake hardware and Isaac topic-based placeholders.
 - `arm_bringup`: top-level launch files.
@@ -86,8 +90,8 @@ base_link
 - `arm_dynamics`: placeholder dynamics interface for future Pinocchio.
 - `arm_planning_examples`: MoveIt planning examples.
 - `arm_interfaces`: custom FK/IK services and trajectory status message.
-- `miraculous_driver`: real CANopen hardware plugin, calibrated profile,
-  controller configuration, and guarded real-MoveIt launch.
+- `miraculous_driver`: real CANopen hardware plugin, controller configuration,
+  and guarded board-side control launch.
 
 ## Dependencies
 
@@ -158,6 +162,32 @@ Headless MoveIt smoke test:
 
 ```bash
 ROS_LOG_DIR=/tmp/ros-log ros2 launch arm_bringup moveit_demo.launch.py use_rviz:=false
+```
+
+### Real Hardware: Split Board / PC Deployment
+
+The production deployment boundary keeps JTC, ros2_control, the hardware
+driver, and CAN on the robot board. MoveIt and RViz run on the external PC.
+
+On the board:
+
+```bash
+ros2 launch miraculous_driver real_control_board.launch.py
+```
+
+On the external PC:
+
+```bash
+ros2 launch arm_moveit_config moveit_remote_pc.launch.py use_rviz:=true
+```
+
+Both processes validate the same `arm_real_config/config/real_arm_profile.yaml`
+and print its SHA-256 deployment fingerprint. The fingerprints must match
+before hardware activation. Full build, DDS, activation, validation, network
+loss, and shutdown requirements are in:
+
+```text
+docs/REMOTE_MOVEIT_DEPLOYMENT.md
 ```
 
 ### Joint State Topic Isolation

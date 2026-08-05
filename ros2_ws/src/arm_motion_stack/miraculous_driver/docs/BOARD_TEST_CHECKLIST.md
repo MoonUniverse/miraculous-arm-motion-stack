@@ -18,11 +18,14 @@ manual_feedback_timeout=15 ms
 feedback_stale_timeout=30 ms
 max_command_step=0.005 rad/cycle   # 暂定，待真机冻结
 max_following_error=0.05 rad × 3 fresh cycles  # 暂定，待真机冻结
+remote heartbeat=50 ms
+remote soft stop timeout=250 ms
+remote hard stop timeout=500 ms
 ```
 
-`moveit_real.launch.py` 的全臂路径会拒绝 timer SYNC、关闭 EMCY、缺少真实限位或关闭
-上述主动 watchdog 的配置。Timer SYNC 不在本轮 Driver 真机验收范围内，由 SDK 团队
-单独验证。
+板端 `real_control_board.launch.py` 的全臂路径会拒绝 timer SYNC、关闭 EMCY、
+缺少真实限位或关闭上述主动 watchdog 的配置。Timer SYNC 不在本轮 Driver 真机
+验收范围内，由 SDK 团队单独验证。
 
 ## 2. 上电前门槛
 
@@ -39,8 +42,9 @@ max_following_error=0.05 rad × 3 fresh cycles  # 暂定，待真机冻结
 cd <ros2_ws>
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-select \
-  arm_description miraculous_driver arm_moveit_config arm_planning_examples
-colcon test --packages-select miraculous_driver
+  arm_real_config arm_remote_control arm_description miraculous_driver \
+  arm_moveit_config arm_planning_examples
+colcon test --packages-select arm_real_config miraculous_driver
 colcon test-result --verbose
 ```
 
@@ -59,7 +63,7 @@ colcon test-result --verbose
 
 ```bash
 ROS_LOG_DIR=/tmp/ros-log \
-ros2 launch miraculous_driver moveit_real.launch.py use_rviz:=true
+ros2 launch miraculous_driver real_control_board.launch.py
 ```
 
 预期：
@@ -67,12 +71,14 @@ ros2 launch miraculous_driver moveit_real.launch.py use_rviz:=true
 - `ARMSystem=inactive`；
 - `joint_state_broadcaster=active`；
 - `arm_controller=inactive`；
+- `/remote_motion_watchdog/state=WAITING_FOR_HEARTBEAT`（PC 尚未启动时）；
 - `/arm_joint_states` 只含 J1–J6，数值有限、方向正确、约 50 Hz；
 - 不进入 `Operation Enabled`，机械臂无主动运动。
 
 ## 5. CSP 使能无跳变
 
-急停人员就位后，按主文档人工激活硬件，再激活控制器：
+先按主文档在 PC 启动 `moveit_remote_pc.launch.py`，并确认板端
+`/remote_motion_watchdog/state=MONITORING`。急停人员就位后，再人工激活硬件和控制器：
 
 ```bash
 ros2 control set_hardware_component_state ARMSystem active
@@ -108,6 +114,7 @@ Driver watchdog。随后验收 controller deactivate/cancel 行为。
 | velocity 读取失败 | 不把 `0 rad/s` 当有效反馈；反馈快照不更新；全臂停止 |
 | 连续跟随超差 | 第 3 个独立 fresh snapshot 触发停止，不重复计同一 snapshot |
 | EMCY/drive fault | 故障锁存；退出进程并外部复位，不允许软件自动恢复 |
+| 执行长轨迹时拔掉 PC 网线 | 软超时后取消 goal 并停用 JTC；若仍运动，硬超时后全臂 quick-stop；恢复网线不续跑 |
 | disable 命令或状态确认失败 | 不报告正常完成；SDK I/O 保持隔离；执行现场安全断能 |
 
 每项保存 ROS 日志、`candump can1`、状态字和时间戳作为验收证据。

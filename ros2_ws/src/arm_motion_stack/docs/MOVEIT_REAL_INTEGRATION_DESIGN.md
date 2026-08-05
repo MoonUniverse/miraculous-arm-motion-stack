@@ -65,18 +65,19 @@
 calibrated: false
 ```
 
-`moveit_real.launch.py` 使用 `require_calibrated=True` 加载它。因此暂定数值尚未完成
-六轴真机复核时，launch 在创建硬件节点前就失败；不能仅为了启动而改成 `true`。
+板端 `real_control_board.launch.py`、PC 端 `moveit_remote_pc.launch.py` 和单机兼容
+入口都使用 `require_calibrated=True` 加载它。因此暂定数值尚未完成六轴真机复核
+时，launch 在创建运行节点前就失败；不能仅为了启动而改成 `true`。
 
 ### 3.2 单一真机配置源
 
 真机 node id、位置限位、规划速度/加速度和通信时序统一来自：
 
 ```text
-miraculous_driver/config/real_arm_profile.yaml
+arm_real_config/config/real_arm_profile.yaml
 ```
 
-launch 从这份 profile 同时派生：
+两个部署端从这份 profile 同时派生：
 
 - xacro/ros2_control hardware parameters；
 - `MiraculousSystem` 的驱动侧软件限位；
@@ -166,11 +167,17 @@ flowchart LR
     JS --> RSP
 ```
 
+这张图表示逻辑链路，不表示所有节点必须在同一台主机。正式部署在
+`MoveItSimpleControllerManager -> JointTrajectoryController` 之间跨越 DDS：
+MoveGroup/RViz 位于外部 PC，JTC、controller manager、Driver 和 CAN 位于板端。
+跨机发送的是完整 `FollowJointTrajectory`，不是 50 Hz 单点命令。详细启动与网络
+验收见 `docs/REMOTE_MOVEIT_DEPLOYMENT.md`。
+
 ## 6. 启动与生命周期设计
 
 ### 6.1 launch 前置校验
 
-`moveit_real.launch.py` 的 `OpaqueFunction` 首先读取 profile。它检查：
+板端和 PC 端 launch 的 `OpaqueFunction` 都首先读取 profile。它检查：
 
 - schema version；
 - 顶层、hardware 和 joint keys 是否完整且无多余项；
@@ -611,7 +618,7 @@ flowchart TB
 文件：
 
 ```text
-miraculous_driver/test/test_real_arm_profile.py
+arm_real_config/test/test_real_arm_profile.py
 ```
 
 验证：
@@ -767,7 +774,7 @@ check_urdf /tmp/arm_moveit_real_test.urdf
 
 ```bash
 ROS_LOG_DIR=/tmp/ros-log \
-ros2 launch miraculous_driver moveit_real.launch.py use_rviz:=false
+ros2 launch miraculous_driver real_control_board.launch.py
 ```
 
 预期：
@@ -863,7 +870,7 @@ fake 成功绝不能替代真机分阶段验收。
 
   ```bash
   sha256sum \
-    install/miraculous_driver/share/miraculous_driver/config/real_arm_profile.yaml
+    install/arm_real_config/share/arm_real_config/config/real_arm_profile.yaml
   ```
 
 - CAN interface：

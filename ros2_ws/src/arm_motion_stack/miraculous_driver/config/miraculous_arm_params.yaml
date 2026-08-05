@@ -2,7 +2,7 @@
 #
 # Generic parameter reference for commissioning nodes and MiraculousSystem.
 # The formal six-axis MoveIt path does not load this file; its only authority is
-# real_arm_profile.yaml, which must pass the calibration gate.
+# arm_real_config/config/real_arm_profile.yaml, which must pass the calibration gate.
 #
 # ROS commands/states and SDK _ex position APIs all use joint/load-side radians.
 miraculous_driver:
@@ -34,5 +34,12 @@ miraculous_driver:
     max_command_step_rad: 0.005
     max_following_error_rad: 0.05
     following_error_cycles: 3
+    # Disabled in generic commissioning entry points. Formal remote MoveIt
+    # launch injects the reviewed timeout and profile fingerprint from
+    # arm_real_config/config/real_arm_profile.yaml.
+    remote_heartbeat_topic: "/arm_remote_control/heartbeat"
+    remote_profile_fingerprint: "disabled"
+    remote_watchdog_timeout_ms: 0
+    remote_stop_velocity_threshold_rad_s: 0.02
     require_position_limits: true
     joint_states_topic: "/arm_joint_states"

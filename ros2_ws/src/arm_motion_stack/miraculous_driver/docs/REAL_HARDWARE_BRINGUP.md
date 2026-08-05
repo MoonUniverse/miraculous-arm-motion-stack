@@ -164,7 +164,8 @@ If the process is unhealthy, stop the launch process and power down according to
 
 ## 7. Deferred Until This Passes
 
-- Full `moveit_real.launch.py` execution.
+- Full board-side `real_control_board.launch.py` plus remote-PC
+  `moveit_remote_pc.launch.py` execution.
 - Multi-joint playback.
 - Large-amplitude trajectory tracking.
 - cuMotion/GPU planning integration.

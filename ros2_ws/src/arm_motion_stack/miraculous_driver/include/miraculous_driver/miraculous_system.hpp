@@ -4,9 +4,11 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "hardware_interface/handle.hpp"
@@ -14,6 +16,8 @@
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp/executors/single_threaded_executor.hpp"
+#include "std_msgs/msg/string.hpp"
 
 #include "miraculous_driver/miraculous_arm.hpp"
 
@@ -28,6 +32,7 @@ public:
 
   MiraculousSystem();
   explicit MiraculousSystem(ArmFactory arm_factory);
+  ~MiraculousSystem() override;
 
   hardware_interface::CallbackReturn on_init(
     const hardware_interface::HardwareInfo & info) override;
@@ -70,6 +75,10 @@ private:
     const FeedbackSnapshot & snapshot, std::string & reason);
   void apply_snapshot(const FeedbackSnapshot & snapshot);
   void fail_safe_stop(const std::string & reason);
+  void start_remote_watchdog();
+  void stop_remote_watchdog() noexcept;
+  bool remote_heartbeat_is_fresh() const;
+  bool remote_command_advanced() const;
   void shutdown_arm();
 
   ArmFactory arm_factory_;
@@ -94,6 +103,18 @@ private:
   bool fault_latched_{false};
   bool stop_issued_{false};
   std::atomic<bool> emcy_latched_{false};
+
+  std::string remote_heartbeat_topic_;
+  std::string remote_profile_fingerprint_;
+  std::chrono::milliseconds remote_watchdog_timeout_{0};
+  double remote_stop_velocity_threshold_rad_s_{0.02};
+  std::atomic<int64_t> last_remote_heartbeat_ns_{0};
+  std::atomic<bool> remote_heartbeat_seen_{false};
+  std::atomic<bool> remote_stale_reported_{false};
+  rclcpp::Node::SharedPtr remote_watchdog_node_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr remote_heartbeat_subscription_;
+  std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> remote_watchdog_executor_;
+  std::thread remote_watchdog_thread_;
 };
 
 }  // namespace miraculous_driver

@@ -1,12 +1,11 @@
-"""Single-host compatibility bringup for the complete six-axis real arm.
+"""Fail-closed board-side control for the complete six-axis real arm.
 
-Production uses real_control_board.launch.py on the board and
-moveit_remote_pc.launch.py on the external PC.
+This launch owns the local trajectory interpolation and hardware I/O.  It does
+not start MoveIt or RViz, so the board can be built without the MoveIt stack.
 """
 
 import os
 
-import yaml
 from ament_index_python.packages import get_package_share_directory
 from arm_real_config import load_real_arm_profile, real_xacro_command_arguments
 from launch import LaunchDescription
@@ -17,23 +16,11 @@ from launch.actions import (
     OpaqueFunction,
     RegisterEventHandler,
 )
-from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-
-def _load_yaml(package_name, relative_path):
-    path = os.path.join(get_package_share_directory(package_name), relative_path)
-    with open(path, "r", encoding="utf-8") as stream:
-        return yaml.safe_load(stream)
-
-
-def _load_text(package_name, relative_path):
-    path = os.path.join(get_package_share_directory(package_name), relative_path)
-    with open(path, "r", encoding="utf-8") as stream:
-        return stream.read()
 
 
 def _launch_setup(context):
@@ -44,13 +31,11 @@ def _launch_setup(context):
     heartbeat_topic_value = heartbeat_topic.perform(context)
 
     description_share = get_package_share_directory("arm_description")
-    moveit_share = get_package_share_directory("arm_moveit_config")
     driver_share = get_package_share_directory("miraculous_driver")
     robot_xacro = os.path.join(description_share, "urdf", "arm.urdf.xacro")
     controller_config = os.path.join(
         driver_share, "config", "real_ros2_controllers.yaml"
     )
-
     robot_description = {
         "robot_description": ParameterValue(
             Command(
@@ -63,42 +48,12 @@ def _launch_setup(context):
             value_type=str,
         )
     }
-    semantic = {
-        "robot_description_semantic": _load_text(
-            "arm_moveit_config", "srdf/arm.srdf"
-        )
-    }
-    kinematics = {
-        "robot_description_kinematics": _load_yaml(
-            "arm_moveit_config", "config/kinematics.yaml"
-        )
-    }
-    planning_limits = {
-        "robot_description_planning": profile.moveit_joint_limits
-    }
-    ompl = _load_yaml("arm_moveit_config", "config/ompl_planning.yaml")
-    moveit_controllers = _load_yaml(
-        "arm_moveit_config", "config/moveit_controllers.yaml"
-    )
-    trajectory_execution = {
-        "allow_trajectory_execution": True,
-        "moveit_manage_controllers": False,
-        "trajectory_execution.allowed_execution_duration_scaling": 1.2,
-        "trajectory_execution.allowed_goal_duration_margin": 0.5,
-        "trajectory_execution.allowed_start_tolerance": 0.02,
-    }
-    planning_scene_monitor = {
-        "publish_planning_scene": True,
-        "publish_geometry_updates": False,
-        "publish_state_updates": True,
-        "publish_transforms_updates": True,
-    }
 
     robot_state_publisher = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
         output="screen",
-        parameters=[robot_description],
+        parameters=[robot_description, {"use_sim_time": False}],
         remappings=[("joint_states", joint_states_topic)],
     )
     control_node = Node(
@@ -110,6 +65,7 @@ def _launch_setup(context):
             {
                 "update_rate": profile.controller_update_rate_hz,
                 "hardware_components_initial_state": {"inactive": ["ARMSystem"]},
+                "use_sim_time": False,
             },
         ],
         remappings=[
@@ -142,46 +98,6 @@ def _launch_setup(context):
             "60",
         ],
     )
-
-    shared_moveit_parameters = [
-        robot_description,
-        semantic,
-        kinematics,
-        planning_limits,
-        ompl,
-        moveit_controllers,
-        {"use_sim_time": False},
-    ]
-    move_group = Node(
-        package="moveit_ros_move_group",
-        executable="move_group",
-        output="screen",
-        parameters=shared_moveit_parameters
-        + [trajectory_execution, planning_scene_monitor],
-        remappings=[("joint_states", joint_states_topic)],
-    )
-    rviz = Node(
-        package="rviz2",
-        executable="rviz2",
-        name="moveit_rviz",
-        output="screen",
-        condition=IfCondition(LaunchConfiguration("use_rviz")),
-        arguments=["-d", os.path.join(moveit_share, "config", "moveit.rviz")],
-        parameters=shared_moveit_parameters,
-        remappings=[("joint_states", joint_states_topic)],
-    )
-    heartbeat = Node(
-        package="arm_remote_control",
-        executable="remote_pc_heartbeat",
-        output="screen",
-        parameters=[
-            {
-                "heartbeat_topic": heartbeat_topic,
-                "profile_fingerprint": profile.fingerprint,
-                "heartbeat_period_ms": profile.remote_heartbeat_period_ms,
-            }
-        ],
-    )
     remote_motion_watchdog = Node(
         package="arm_remote_control",
         executable="remote_motion_watchdog",
@@ -202,45 +118,22 @@ def _launch_setup(context):
 
     return [
         LogInfo(
-            msg=f"LOCAL real-arm profile fingerprint sha256:{profile.fingerprint}"
+            msg=f"BOARD real-arm profile fingerprint sha256:{profile.fingerprint}"
         ),
         robot_state_publisher,
         control_node,
         joint_state_broadcaster_spawner,
         arm_controller_spawner,
-        heartbeat,
         remote_motion_watchdog,
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=joint_state_broadcaster_spawner,
-                on_exit=[move_group, rviz],
-            )
-        ),
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=heartbeat,
-                on_exit=[
-                    EmitEvent(
-                        event=Shutdown(reason="local heartbeat process exited")
-                    )
-                ],
-            )
-        ),
         RegisterEventHandler(
             OnProcessExit(
                 target_action=remote_motion_watchdog,
                 on_exit=[
                     EmitEvent(
-                        event=Shutdown(reason="local motion watchdog exited")
+                        event=Shutdown(
+                            reason="board remote-motion watchdog exited"
+                        )
                     )
-                ],
-            )
-        ),
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=move_group,
-                on_exit=[
-                    EmitEvent(event=Shutdown(reason="local move_group exited"))
                 ],
             )
         ),
@@ -256,7 +149,6 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("real_profile", default_value=default_profile),
-            DeclareLaunchArgument("use_rviz", default_value="true"),
             DeclareLaunchArgument(
                 "joint_states_topic", default_value="/arm_joint_states"
             ),

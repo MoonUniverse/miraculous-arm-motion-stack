@@ -123,8 +123,10 @@ validate these existing components before adding new ones:
   - `miraculous_driver/src/miraculous_system.cpp`
 - Real controller configuration:
   `miraculous_driver/config/real_ros2_controllers.yaml`
-- Real launch entry:
-  `miraculous_driver/launch/moveit_real.launch.py`
+- Board-side real control entry:
+  `miraculous_driver/launch/real_control_board.launch.py`
+- PC-side MoveIt entry:
+  `arm_moveit_config/launch/moveit_remote_pc.launch.py`
 - MoveIt package: `arm_moveit_config`
 - SRDF: `arm_moveit_config/srdf/arm.srdf`
 - Kinematics: `arm_moveit_config/config/kinematics.yaml`
@@ -132,7 +134,7 @@ validate these existing components before adding new ones:
 - MoveIt controller mapping:
   `arm_moveit_config/config/moveit_controllers.yaml`
 - Versioned real-arm profile:
-  `miraculous_driver/config/real_arm_profile.yaml`
+  `arm_real_config/config/real_arm_profile.yaml`
 
 The intended real-hardware command path is:
 

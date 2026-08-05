@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>arm_remote_control</name>
+  <version>0.1.0</version>
+  <description>
+    Hardware-independent heartbeat and fail-closed motion supervision for the
+    ARM remote MoveIt deployment.
+  </description>
+  <maintainer email="todo@example.com">TODO</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>control_msgs</depend>
+  <depend>controller_manager_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

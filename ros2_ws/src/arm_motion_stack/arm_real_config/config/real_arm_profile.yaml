@@ -23,6 +23,13 @@ hardware:
   # Match the JTC path tolerance and stop after three distinct feedback sets.
   max_following_error_rad: 0.05
   following_error_cycles: 3
+  # The PC publishes a volatile heartbeat at 20 Hz. The board first cancels
+  # and deactivates JTC after 250 ms; the hardware plugin escalates a still
+  # moving arm to verified CiA402 Quick Stop after 500 ms.
+  remote_heartbeat_period_ms: 50
+  remote_soft_timeout_ms: 250
+  remote_hard_timeout_ms: 500
+  remote_stop_velocity_threshold_rad_s: 0.02
 
 joints:
   J1:

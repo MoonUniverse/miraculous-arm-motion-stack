@@ -106,7 +106,8 @@ ros2_ws/src/arm_motion_stack/miraculous_driver/
 │   └── real_ros2_controllers.yaml          # 真实硬件 controller_manager 配置
 └── launch/
     ├── real_control.launch.py              # 真实硬件 ros2_control 启动
-    ├── moveit_real.launch.py               # MoveIt + 真实硬件
+    ├── real_control_board.launch.py        # 生产板端控制链
+    ├── moveit_real.launch.py               # 单机兼容入口
     ├── teach.launch.py                     # 示教记录
     └── playback.launch.py                 # 回放
 ```
@@ -421,6 +422,7 @@ install/miraculous_driver/
     │   └── real_ros2_controllers.yaml
     └── launch/
         ├── real_control.launch.py
+        ├── real_control_board.launch.py
         ├── moveit_real.launch.py
         ├── teach.launch.py
         └── playback.launch.py
@@ -456,7 +458,7 @@ cat install/miraculous_driver/share/miraculous_driver/miraculous_driver_plugins.
 
 ## 7. 使用方式
 
-### 7.1 MoveIt + 真实硬件
+### 7.1 MoveIt + 真实硬件（板端/PC 拆分）
 
 完整安全流程、profile 标定、人工使能与故障恢复见：
 
@@ -466,16 +468,14 @@ cat install/miraculous_driver/share/miraculous_driver/miraculous_driver_plugins.
 
 ```bash
 source install/setup.bash
-ros2 launch miraculous_driver moveit_real.launch.py
+ros2 launch miraculous_driver real_control_board.launch.py
+
+# 外部 PC 的另一个终端：
+ros2 launch arm_moveit_config moveit_remote_pc.launch.py
 ```
 
-启动内容:
-- robot_state_publisher (URDF, `hardware_type:=real`)
-- ros2_control_node (MiraculousSystem 插件)
-- joint_state_broadcaster spawner
-- arm_controller spawner（仅加载为 inactive，必须人工激活）
-- MoveGroup (MoveIt 规划)
-- RViz (可选, `use_rviz:=false` 关闭)
+板端启动 robot_state_publisher、ros2_control、JTC 和 Driver；PC 启动 MoveGroup 与
+RViz。完整双机部署与 DDS 验收见 `../../docs/REMOTE_MOVEIT_DEPLOYMENT.md`。
 
 默认 `real_arm_profile.yaml` 为 `calibrated: false`，因此未填入并审核六轴
 position limits 前，启动会在接触硬件前明确失败。
@@ -721,7 +721,7 @@ SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接�
 
 ## 12. 待办事项
 
-- [ ] 在 `config/real_arm_profile.yaml` 中审核并冻结六轴 `position_min` / `position_max`，
+- [ ] 在 `../../arm_real_config/config/real_arm_profile.yaml` 中审核并冻结六轴 `position_min` / `position_max`，
   通过校准门后再把 `calibrated` 设为 `true`
 - [ ] 在 ARM 目标机上用真实 CAN 总线进行端到端测试
 - [x] ~~`csp_set_target` 是否自动发 SYNC~~ — 2026-07-07 审查确认不自动发：`test_csp_ex.c:134-143` 在 set_target 后显式调用 `sync_send`
@@ -748,12 +748,13 @@ SDK 从预编译快照 `miraculous_sdk_x86_64_linux_gnu_20260702` 换成直接�
 | [miraculous_system.cpp](../src/miraculous_system.cpp) | 435 | 插件实现 |
 | [teach_record_node.cpp](../src/teach_record_node.cpp) | 260 | 示教记录节点 |
 | [playback_node.cpp](../src/playback_node.cpp) | 301 | 回放节点 |
-| [real_arm_profile.yaml](../config/real_arm_profile.yaml) | — | 六轴 MoveIt 真机参数唯一来源与校准门 |
+| [real_arm_profile.yaml](../../arm_real_config/config/real_arm_profile.yaml) | — | 六轴 MoveIt 真机参数唯一来源与校准门 |
 | [miraculous_arm_params.yaml](../config/miraculous_arm_params.yaml) | — | 低层 commissioning 参数参考，不用于正式 MoveIt launch |
 | [BOARD_TEST_CHECKLIST.md](BOARD_TEST_CHECKLIST.md) | — | 2026-07-07 修复的板上测试步骤 |
 | [real_ros2_controllers.yaml](../config/real_ros2_controllers.yaml) | 39 | controller 配置 |
 | [real_control.launch.py](../launch/real_control.launch.py) | 53 | ros2_control 启动 |
-| [moveit_real.launch.py](../launch/moveit_real.launch.py) | 55 | MoveIt 启动 |
+| [real_control_board.launch.py](../launch/real_control_board.launch.py) | — | 生产板端控制启动 |
+| [moveit_real.launch.py](../launch/moveit_real.launch.py) | — | 单机兼容启动 |
 | [teach.launch.py](../launch/teach.launch.py) | 63 | 示教启动 |
 | [playback.launch.py](../launch/playback.launch.py) | 66 | 回放启动 |
 | [ros2_control.xacro](../../arm_description/urdf/ros2_control.xacro) | 78 | xacro (新增 real 分支) |
