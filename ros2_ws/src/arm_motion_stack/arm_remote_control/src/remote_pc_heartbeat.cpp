@@ -58,8 +58,8 @@ public:
       });
 
     RCLCPP_INFO(
-      get_logger(), "Publishing remote-control heartbeat every %d ms on %s",
-      period_ms, topic.c_str());
+      get_logger(), "Publishing remote-control heartbeat every %lld ms on %s",
+      static_cast<long long>(period_ms), topic.c_str());
   }
 
 private:

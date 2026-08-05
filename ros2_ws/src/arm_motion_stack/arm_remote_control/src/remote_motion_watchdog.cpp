@@ -116,8 +116,8 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Waiting for matching PC heartbeat on %s; soft stop timeout=%d ms",
-      heartbeat_topic_.c_str(), soft_timeout_ms);
+      "Waiting for matching PC heartbeat on %s; soft stop timeout=%lld ms",
+      heartbeat_topic_.c_str(), static_cast<long long>(soft_timeout_ms));
   }
 
 private:
